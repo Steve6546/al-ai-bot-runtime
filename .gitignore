@@ -1,0 +1,41 @@
+# ---- Secrets & environment (NEVER commit) ----
+.env
+.env.*
+!.env.example
+
+# ---- Runtime state / locks / pids ----
+.bot.pid
+.bot.lock
+.supervisor.lock
+bot-state.json
+health-state.json
+launch-handoff.json
+
+# ---- Logs & event dumps ----
+*.log
+*.log.*
+logs/
+failed-events.jsonl
+adapter-seen.jsonl
+config-lifecycle.log
+
+# ---- Local config with real IDs (use control-plane.example.json) ----
+control-plane.json
+control-plane.staged.json
+control-plane.json.bak.*
+
+# ---- Atomic write temp files ----
+*.tmp.*
+
+# ---- Node ----
+node_modules/
+dist/
+npm-debug.log*
+
+# ---- Backups & local artifacts ----
+backups/
+test-rotation.log*
+
+# ---- OS ----
+Thumbs.db
+.DS_Store

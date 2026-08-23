@@ -1,0 +1,20 @@
+{
+  "name": "al-ai-bot-runtime",
+  "version": "1.0.0",
+  "description": "Production-hardened Discord bot runtime — single Gateway, supervisor, pipeline, hardened adapter",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start:gateway": "node bot-supervisor.mjs --mode=logger --action=start",
+    "restart:gateway": "node bot-supervisor.mjs --mode=logger --action=restart",
+    "status": "node bot-supervisor.mjs --action=status",
+    "adapter": "node integration-adapter.mjs",
+    "test:pipeline": "node test-pipeline.mjs",
+    "test:adapter": "node test-adapter-hardened.mjs"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "zod": "^4.4.3",
+    "dotenv": "^17.2.1"
+  }
+}
