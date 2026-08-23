@@ -1,11 +1,16 @@
 #!/usr/bin/env node
-// integration-adapter.mjs — Phase 3 hardened (HMAC, persistent dedupe, schema, rate limit, body limit)
+// integration-adapter.mjs — hardened local HTTP API (HMAC, persistent dedupe,
+// schema, rate limit, body limit). Since v1.0.0: secrets load through lib/env
+// (dotenv), handlers live in a registry so new actions are a one-entry change,
+// and staged writes use the shared atomic write helper.
 import { createServer } from 'node:http';
-import { readFileSync, appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { startRotationWatcher } from './log-rotation.mjs';
+import { readEnv } from './lib/env.mjs';
+import { atomicWriteJson } from './lib/atomic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // rotation watcher for adapter logs (async, light) — health-state is owned by gateway (logger) only
@@ -22,15 +27,11 @@ const HMAC_WINDOW_MS = 5 * 60 * 1000; // 5 min
 const RATE_LIMIT_WINDOW = 60 * 1000;
 const RATE_LIMIT_MAX = 60; // per IP per minute
 
-// Load secrets from .env
-let ADAPTER_TOKEN = '';
-try {
-  const env = readFileSync(join(__dirname, '.env'), 'utf8');
-  const m = env.match(/ADAPTER_TOKEN\s*=\s*(.+)/);
-  if (m) ADAPTER_TOKEN = m[1].trim();
-} catch {}
+// Load secret from .env via lib/env (dotenv) — clear error, no regex parsing
+const ADAPTER_TOKEN = readEnv('ADAPTER_TOKEN');
 if (!ADAPTER_TOKEN) {
-  console.error('FATAL: ADAPTER_TOKEN not found in .env');
+  console.error('FATAL: ADAPTER_TOKEN not found. Copy .env.example to .env and generate a token with:');
+  console.error('  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
   process.exit(1);
 }
 
@@ -336,53 +337,57 @@ const server = createServer(async (req,res)=>{
   });
 });
 
+// Action handler registry — adding an action means adding one entry here plus
+// its SCHEMAS entry and (for sensitive ones) the allowlist. handleAction
+// dispatches; the request pipeline above stays untouched.
+const HANDLERS = {
+  async getStatus() {
+    const s = readState();
+    let supervisor = null;
+    try{
+      const { execSync } = await import('node:child_process');
+      const out = execSync(`node "${join(__dirname,'bot-supervisor.mjs')}" --action=status`,{encoding:'utf8',timeout:4000});
+      supervisor = out.slice(0,2000);
+    }catch(e){ supervisor = String(e.message).slice(0,200); }
+    return { state:s, supervisor };
+  },
+  async suggestConfig(params) {
+    return { validated:true, suggestion: params, note:'use applyConfig with ownerApproval to apply' };
+  },
+  async applyConfig(params) {
+    const stagedPath = join(__dirname,'control-plane.staged.json');
+    atomicWriteJson(stagedPath, params);
+    return { applied:false, staged:true, path:'control-plane.staged.json', note:'staged — run config-manager apply to validate/diff/resource-check/health-check' };
+  },
+  async diagnose() {
+    return { checks: ['gateway single instance — ok','pipeline queues — 5 categories','audit resolver — active','hmac — enforced','rate limit — active'] };
+  },
+  async readLogs(params) {
+    const n = Math.min(Number(params?.lines)||20, 100);
+    let sup=''; let adp='';
+    try{ sup = readFileSync(join(__dirname,'supervisor.log'),'utf8').split('\n').slice(-n).join('\n'); }catch{}
+    try{ adp = readFileSync(LOG_FILE,'utf8').split('\n').slice(-n).join('\n'); }catch{}
+    return { supervisorTail: sup, adapterTail: adp };
+  },
+  async listChannels() {
+    return { note: 'use Discord REST via control plane — not direct' };
+  },
+};
+
 async function handleAction(action, params){
-  switch(action){
-    case 'getStatus': {
-      const s = readState();
-      let supervisor = null;
-      try{
-        const { execSync } = await import('node:child_process');
-        const out = execSync(`node "${join(__dirname,'bot-supervisor.mjs')}" --action=status`,{encoding:'utf8',timeout:4000});
-        supervisor = out.slice(0,2000);
-      }catch(e){ supervisor = e.message; }
-      return { state:s, supervisor };
-    }
-    case 'suggestConfig': {
-      return { validated:true, suggestion: params, note:'use applyConfig with ownerApproval to apply' };
-    }
-    case 'applyConfig': {
-      const { writeFileSync, openSync, closeSync, fsyncSync, unlinkSync, renameSync } = await import('node:fs');
-      const stagedPath = join(__dirname,'control-plane.staged.json');
-      const tmp = stagedPath + '.tmp.' + Date.now() + '.' + Math.random().toString(36).slice(2,6);
-      const fd = openSync(tmp, 'w');
-      writeFileSync(fd, JSON.stringify(params,null,2));
-      fsyncSync(fd);
-      closeSync(fd);
-      try{ unlinkSync(stagedPath);}catch{}
-      renameSync(tmp, stagedPath);
-      // also fsync directory? best effort
-      return { applied:false, staged:true, path:'control-plane.staged.json', note:'staged — run config-manager apply to validate/diff/resource-check/health-check' };
-    }
-    case 'diagnose': {
-      return { checks: ['gateway single instance — ok','pipeline queues — 5 categories','audit resolver — active','hmac — enforced','rate limit — active'] };
-    }
-    case 'readLogs': {
-      const n = Math.min(Number(params?.lines)||20, 100);
-      const { readFileSync } = await import('node:fs');
-      let sup=''; let adp='';
-      try{ sup = readFileSync(join(__dirname,'supervisor.log'),'utf8').split('\n').slice(-n).join('\n'); }catch{}
-      try{ adp = readFileSync(LOG_FILE,'utf8').split('\n').slice(-n).join('\n'); }catch{}
-      return { supervisorTail: sup, adapterTail: adp };
-    }
-    case 'listChannels': {
-      return { note: 'use Discord REST via control plane — not direct' };
-    }
-    default: throw new Error('unhandled');
-  }
+  const handler = HANDLERS[action];
+  if (!handler) throw new Error('unhandled');
+  return handler(params);
 }
 
 server.listen(PORT, '127.0.0.1', ()=>{
   log(`listening on 127.0.0.1:${PORT} — allowlist: ${[...ALLOWLIST].join(', ')} — hmac enforced, maxBody ${MAX_BODY}`);
 });
-process.on('SIGTERM', ()=>{ log('SIGTERM — closing'); server.close(()=>process.exit(0)); });
+function shutdown(signal){
+  log(`${signal} — closing`);
+  server.close(()=>process.exit(0));
+  // force-exit if close hangs on keep-alive sockets
+  setTimeout(()=>process.exit(0), 3000).unref();
+}
+process.on('SIGTERM', ()=>shutdown('SIGTERM'));
+process.on('SIGINT', ()=>shutdown('SIGINT'));

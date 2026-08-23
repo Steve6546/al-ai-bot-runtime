@@ -16,7 +16,7 @@
     "verifyCmdline": true
   },
   "permissions": {
-    "ownerId": "YOUR_DISCORD_USER_ID_17_20_DIGITS",
+    "ownerId": "123456789012345678",
     "controlPlaneAllowedRoles": ["Owner", "Co Owner"],
     "requireAuditForModLog": true
   },
@@ -32,5 +32,9 @@
     "debounceMs": 2500,
     "batchMs": 3500,
     "suppressMs": 10000
+  },
+  "autorole": {
+    "enabled": true,
+    "memberRoleName": "Member"
   }
 }

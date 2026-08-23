@@ -1,8 +1,11 @@
-import { readFileSync } from 'node:fs';
 import { createHmac, randomUUID } from 'node:crypto';
+import { readEnv } from './lib/env.mjs';
 
-const env = readFileSync('./.env','utf8');
-const token = env.match(/ADAPTER_TOKEN\s*=\s*(.+)/)[1].trim();
+const token = readEnv('ADAPTER_TOKEN');
+if (!token) {
+  console.error('FATAL: ADAPTER_TOKEN missing — copy .env.example to .env (see README).');
+  process.exit(1);
+}
 
 async function adapterCall(action, params){
   const body = JSON.stringify({requestId:`t-${randomUUID()}`, identity:'owner', action, params, ownerApproval:true});
@@ -44,4 +47,7 @@ console.log(bad3.status, JSON.stringify(bad3.json).slice(0,140));
 console.log(bad3.status===400 ? 'PASS ownerId rejected' : 'FAIL');
 
 console.log('\nAll adapter validation tests done.');
-process.exit(0);
+// No process.exit(): undici keep-alive sockets are still closing on Windows/
+// Node 24 and a forced exit can trip a libuv teardown assertion — draining
+// naturally exits with the code below.
+process.exitCode = 0;

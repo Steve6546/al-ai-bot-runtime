@@ -9,7 +9,6 @@
 .supervisor.lock
 bot-state.json
 health-state.json
-launch-handoff.json
 
 # ---- Logs & event dumps ----
 *.log

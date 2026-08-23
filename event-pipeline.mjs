@@ -1,4 +1,9 @@
-// event-pipeline.mjs — Phase 2: bounded queues, fair scheduling, per-channel circuit, metrics, failed-events
+// event-pipeline.mjs — bounded queues, fair scheduling, per-channel circuit,
+// metrics, failed-events persistence.
+// Since v1.0.0: timings come from control-plane.json (via the constructor),
+// batched moderation flushes have bounded retries with backoff before being
+// persisted to failed-events.jsonl, and no guild/channel ID is hardcoded —
+// every destination comes from `channels` and every event carries its guildId.
 import { EmbedBuilder, AuditLogEvent } from 'discord.js';
 import { appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -7,11 +12,12 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FAILED_FILE = join(__dirname, 'failed-events.jsonl');
 
-// Configurable max lengths per queue
 const DEFAULT_MAX = { moderation: 200, member: 120, server: 100, voice: 60, message: 100 };
+const DEFAULT_TIMING = { debounceMs: 2500, batchMs: 3500, suppressMs: 10000 };
+const MOD_FLUSH_RETRIES = 2;
 
 export class EventPipeline {
-  constructor({ client, channels, getAudit, sendEmbed, log, err, maxLengths = {} }) {
+  constructor({ client, channels, getAudit, sendEmbed, log, err, maxLengths = {}, timing = {} }) {
     this.client = client;
     this.CH = channels;
     this.getAudit = getAudit;
@@ -19,6 +25,7 @@ export class EventPipeline {
     this.log = log;
     this.err = err;
     this.maxLengths = { ...DEFAULT_MAX, ...maxLengths };
+    this.timing = { ...DEFAULT_TIMING, ...timing };
     this.queues = { moderation: [], member: [], server: [], voice: [], message: [] };
     this.priority = ['moderation', 'member', 'server', 'voice', 'message'];
     this.weights = { moderation: 4, member: 2, server: 2, voice: 1, message: 1 };
@@ -53,13 +60,13 @@ export class EventPipeline {
 
   hasPending() { return this.priority.some(c => this.queues[c].length > 0) || this.pendingMod.length > 0; }
 
-  shouldFire(key, ms = 2500) {
+  shouldFire(key, ms = this.timing.debounceMs) {
     const last = this.debounce.get(key) || 0;
     if (Date.now() - last < ms) return false;
     this.debounce.set(key, Date.now());
     return true;
   }
-  suppress(id, ms = 10000) { this.suppressed.set(id, Date.now() + ms); setTimeout(() => this.suppressed.delete(id), ms); }
+  suppress(id, ms = this.timing.suppressMs) { this.suppressed.set(id, Date.now() + ms); setTimeout(() => this.suppressed.delete(id), ms); }
   isSuppressed(id) { const exp = this.suppressed.get(id); return exp && exp > Date.now(); }
 
   getCircuit(channelId) {
@@ -79,7 +86,7 @@ export class EventPipeline {
       this.metrics.queueDepth[cat] = this.queues[cat].length;
       const oldest = this.queues[cat][0];
       this.metrics.oldestAgeMs[cat] = oldest ? Date.now() - (oldest._ts || Date.now()) : 0;
-      const chId = this.CH[cat === 'moderation' ? 'MOD_LOG' : cat === 'member' ? 'MEMBER' : cat === 'server' ? 'SERVER' : cat === 'voice' ? 'VOICE_LOG' : 'MESSAGE'];
+      const chId = this.getChannelForCategory(cat, this.queues[cat][0]);
       const circ = chId ? this.getCircuit(chId) : null;
       this.metrics.circuitState[cat] = circ ? (Date.now() < circ.openUntil ? `open:${Math.round((circ.openUntil-Date.now())/1000)}s` : 'closed') : 'closed';
     }
@@ -124,7 +131,6 @@ export class EventPipeline {
         const dropped = this.queues[category].shift();
         this.metrics.dropped[category]++;
         this.log(`dropped ${category} oldest event due to overflow (max ${max})`);
-        // optionally merge: if both are same type/channel, we could merge but for now drop oldest
       } else {
         // member/server: drop oldest with counter
         this.queues[category].shift();
@@ -161,7 +167,7 @@ export class EventPipeline {
             // per-channel circuit check before handling
             const chId = this.getChannelForCategory(cat, this.queues[cat][0]);
             if (chId && this.isCircuitOpen(chId)) {
-              this.log(`circuit open for ${cat} channel ${chId.slice(-4)} — deferring`);
+              this.log(`circuit open for ${cat} channel ${String(chId).slice(-4)} — deferring`);
               break; // skip this category this round, let circuit cool
             }
             const ev = this.queues[cat].shift();
@@ -178,7 +184,7 @@ export class EventPipeline {
               // Bounded counter (not boolean) prevents unshift-forever FIFO starvation.
               if (cat === 'moderation') {
                 const r = ev._retries || 0;
-                if (r < 2) {
+                if (r < MOD_FLUSH_RETRIES) {
                   ev._retries = r + 1;
                   this.metrics.retried[cat]++;
                   this.queues[cat].push(ev); // push (not unshift): keeps FIFO, retried event goes after pending ones
@@ -266,15 +272,27 @@ export class EventPipeline {
   queueMod(entry) {
     this.pendingMod.push(entry);
     entry._ts = Date.now();
-    if (!this.modTimer) this.modTimer = setTimeout(() => this.flushMod(), 3500);
+    if (!this.modTimer) this.modTimer = setTimeout(() => this.flushMod(), this.timing.batchMs);
   }
   async flushMod() {
     const batch = [...this.pendingMod]; this.pendingMod = []; this.modTimer = null;
     if (!batch.length) return;
     const chId = this.CH.MOD_LOG;
-    if (this.isCircuitOpen(chId)) { this.log('mod flush deferred circuit open'); this.pendingMod.unshift(...batch); this.schedule(); return; }
+    if (this.isCircuitOpen(chId)) {
+      this.log('mod flush deferred circuit open');
+      this.pendingMod.unshift(...batch);
+      this.modTimer = setTimeout(() => this.flushMod(), this.timing.batchMs);
+      return;
+    }
+    const guildId = batch[0].guildId;
+    if (!guildId) {
+      // never send to an unknown guild — persist instead of guessing
+      for (const b of batch) this.writeFailed('moderation', b, 'missing guildId on event');
+      this.metrics.failed.moderation += batch.length;
+      return;
+    }
     try {
-      const g = await this.client.guilds.fetch(batch[0].guildId || '1523473815555018782');
+      const g = await this.client.guilds.fetch(guildId);
       const ch = await g.channels.fetch(chId);
       if (!ch?.isTextBased()) throw new Error('mod channel not text');
       if (batch.length === 1) {
@@ -297,9 +315,20 @@ export class EventPipeline {
     } catch (e) {
       this.err('flushMod', e.message);
       this.recordCircuit(chId, false);
-      // on failure, persist to failed file, not drop silently
-      for (const b of batch) this.writeFailed('moderation', b, e.message);
       this.metrics.failed.moderation += batch.length;
+      // Bounded batch retry with backoff (mirrors process()-level moderation
+      // retries); after MOD_FLUSH_RETRIES the batch is persisted, never dropped.
+      const retries = batch[0]._retries || 0;
+      if (retries < MOD_FLUSH_RETRIES) {
+        for (const b of batch) b._retries = retries + 1;
+        this.metrics.retried.moderation += batch.length;
+        this.pendingMod.unshift(...batch);
+        this.modTimer = setTimeout(() => this.flushMod(), 1500 * (retries + 1));
+        this.log(`mod flush retry ${retries + 1}/${MOD_FLUSH_RETRIES} in ${1500 * (retries + 1)}ms`);
+      } else {
+        for (const b of batch) this.writeFailed('moderation', b, `retries exhausted (${retries}): ${e.message}`);
+        this.err(`mod batch persisted to failed-events after ${retries} retries`, e.message);
+      }
     }
   }
   buildModEmbed(b) {

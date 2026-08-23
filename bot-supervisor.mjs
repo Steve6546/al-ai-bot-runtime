@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { verifyProcess } from './process-verification.mjs';
+import { gatewayLogPath } from './lib/paths.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PID_FILE = join(__dirname, '.bot.pid');
@@ -13,10 +14,6 @@ const LOCK_FILE = join(__dirname, '.bot.lock');
 const TX_LOCK = join(__dirname, '.supervisor.lock');
 const STATE_FILE = join(__dirname, 'bot-state.json');
 const LOG_FILE = join(__dirname, 'supervisor.log');
-const ADAPTER_LOG = join(__dirname, 'adapter.log');
-const FAILED_FILE = join(__dirname, 'failed-events.jsonl');
-const LIFECYCLE_LOG = join(__dirname, 'config-lifecycle.log');
-const LOGGER_OUT = join(process.env.TEMP || 'C:\\Users\\dlwta\\AppData\\Local\\Temp', 'opencode', 'logger-out.log');
 
 const RUNTIME = {
   logger: { script: 'autorole-logger.mjs', name: 'logger' },
@@ -134,12 +131,15 @@ async function gracefulStop(pid, timeout=6000, expectedScript=null){
   log(`taskkill result pid ${pid} state=${final.state}`);
   return final.state==='dead';
 }
-function spawnRuntime(mode){
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function spawnRuntime(mode){
   const rt = RUNTIME[mode];
   if(!rt) throw new Error(`unknown runtime ${mode}`);
   const scriptPath = join(__dirname, rt.script);
   const argsStr = (rt.args||[]).join(' ');
-  const logOut = join(process.env.TEMP || 'C:\\Users\\dlwta\\AppData\\Local\\Temp','opencode','logger-out.log');
+  // gatewayLogPath() creates the directory if missing so the redirect can never fail
+  const logOut = gatewayLogPath();
   const cmdLine = `cmd /c cd /d "${__dirname}" && node "${scriptPath}" ${argsStr} > "${logOut}" 2>&1`;
   const psSafe = cmdLine.replace(/'/g,"''");
   const wmiOut = execSync(`powershell -NoProfile -Command "$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${psSafe}'}; Write-Output $r.ProcessId"`,{encoding:'utf8'}).trim();
@@ -147,7 +147,7 @@ function spawnRuntime(mode){
   let nodePid = cmdPid;
   try{
     for(let i=0;i<6;i++){
-      execSync(`powershell -NoProfile -Command "Start-Sleep -Milliseconds 400"`,{stdio:'ignore'});
+      await sleep(400);
       const q = execSync(`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"ParentProcessId=${cmdPid}\\" | Where-Object { $_.CommandLine -like '*${rt.script}*' } | Select-Object -ExpandProperty ProcessId"`,{encoding:'utf8'}).trim();
       const cand = Number(q.split(/\s+/).pop());
       const vv = verifyProcess(cand, rt.script);
@@ -166,7 +166,7 @@ async function waitForReady(expectedPid, timeout=12000){
       const vv = verifyProcess(lock.pid, 'autorole-logger.mjs');
       if(vv.state==='alive'){
         try{
-          const out = readFileSync(join(process.env.TEMP||'C:\\Users\\dlwta\\AppData\\Local\\Temp','opencode','logger-out.log'),'utf8');
+          const out = readFileSync(gatewayLogPath(),'utf8');
           if(out.includes('READY as')){ log(`readiness verified pid ${expectedPid}`); return true; }
         }catch{}
       } else if(vv.state==='unknown'){
@@ -231,7 +231,7 @@ async function start(){
       try{ unlinkSync(PID_FILE);}catch{}
     }
     log(`starting runtime mode=${mode}`);
-    const pid=spawnRuntime(mode);
+    const pid=await spawnRuntime(mode);
     await new Promise(r=>setTimeout(r,1200));
     const vv=verifyProcess(pid);
     if(vv.state!=='alive'){ log(`FAILED spawned pid ${pid} state=${vv.state} ${vv.reason}`); process.exit(1); }
@@ -300,7 +300,7 @@ async function stop(){
         }
       }
       log(`restart: starting new mode=${mode}`);
-      const pid=spawnRuntime(mode);
+      const pid=await spawnRuntime(mode);
       await new Promise(r=>setTimeout(r,1200));
       const vv=verifyProcess(pid);
       if(vv.state!=='alive'){ log(`FAILED spawned pid ${pid} state=${vv.state}`); process.exit(1); }

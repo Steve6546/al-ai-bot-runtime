@@ -1,26 +1,41 @@
+// autorole-logger.mjs — Single Gateway Runtime (discord.js v14).
+// Config contract (v1.0.0): guild + token come from .env (OMNICORD_GUILD,
+// DISCORD_TOKEN); the six log channels, timings and autorole behavior come
+// from control-plane.json via resolveRuntimeConfig(). No IDs are hardcoded.
+// Start/stop only through bot-supervisor.mjs; the .bot.lock below is what
+// actually enforces the single-gateway guarantee.
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Client, GatewayIntentBits, Partials, EmbedBuilder, Events, AuditLogEvent } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, Events } from 'discord.js';
 import { EventPipeline } from './event-pipeline.mjs';
 import { startRotationWatcher } from './log-rotation.mjs';
-import { startHealthWatcher, updateHealthState, setLastError, setLastEvent } from './health-state.mjs';
+import { startHealthWatcher, setLastError, setLastEvent } from './health-state.mjs';
 import { verifyProcess } from './process-verification.mjs';
+import { resolveRuntimeConfig } from './lib/config.mjs';
+import { gatewayLogPath } from './lib/paths.mjs';
+import { atomicWriteJson } from './lib/atomic.mjs';
+import { randomUUID } from 'node:crypto';
+import { renameSync, openSync, closeSync, fsyncSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PID_FILE = join(__dirname, '.bot.pid');
 const LOCK_FILE = join(__dirname, '.bot.lock');
-import { randomUUID } from 'node:crypto';
-import { renameSync, openSync, closeSync, fsyncSync } from 'node:fs';
-function atomicWriteJson(path, data) {
-  // fs.rename overwrites destination atomically on Windows; pre-unlink removed (crash window)
-  const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${randomUUID().slice(0,4)}`;
-  const fd = openSync(tmp, 'w');
-  writeFileSync(fd, JSON.stringify(data, null, 2));
-  try { fsyncSync(fd); } catch {}
-  closeSync(fd);
-  renameSync(tmp, path);
+
+// Fail fast on missing/invalid env or control-plane.json — before any lock
+// is created, with one actionable message instead of a downstream crash.
+let RUNTIME;
+try {
+  RUNTIME = resolveRuntimeConfig();
+} catch (e) {
+  console.error(new Date().toISOString(), 'FATAL:', e.message);
+  process.exit(1);
 }
+const { token: TOKEN, guildId: GUILD, channels: CH, timing, autoroleEnabled, memberRoleName: MEMBER_ROLE } = RUNTIME;
+const log = (...a) => console.log(new Date().toISOString(), 'LOG:', ...a);
+const err = (...a) => console.log(new Date().toISOString(), 'ERR:', ...a);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 const LOCK_NONCE = randomUUID();
 const LOCK_DATA = {
   pid: process.pid,
@@ -70,7 +85,7 @@ const _logFiles = [
   join(__dirname, 'adapter.log'),
   join(__dirname, 'failed-events.jsonl'),
   join(__dirname, 'config-lifecycle.log'),
-  join(process.env.TEMP || 'C:\\Users\\dlwta\\AppData\\Local\\Temp', 'opencode', 'logger-out.log')
+  gatewayLogPath(),
 ];
 try { startRotationWatcher(_logFiles); } catch {}
 function cleanupLock() {
@@ -85,11 +100,11 @@ function cleanupLock() {
   try { unlinkSync(PID_FILE); } catch {}
 }
 process.on('exit', cleanupLock);
-process.on('SIGINT', async () => { 
+process.on('SIGINT', async () => {
   console.log(new Date().toISOString(), 'LOG: SIGINT received');
-  try { await client.destroy(); } catch {} 
+  try { await client.destroy(); } catch {}
   cleanupLock();
-  process.exit(0); 
+  process.exit(0);
 });
 process.on('SIGTERM', async () => {
   console.log(new Date().toISOString(), 'LOG: SIGTERM received — graceful destroy');
@@ -103,22 +118,6 @@ process.on('SIGTERM', async () => {
   cleanupLock();
   process.exit(0);
 });
-
-const env = readFileSync(join(__dirname, '.env'), 'utf8');
-const TOKEN = env.match(/DISCORD_TOKEN\s*=\s*(.+)/)[1].trim();
-const GUILD = '1523473815555018782';
-const CH = {
-  JOIN_LEAVE: '1540984557883367484',
-  VOICE_LOG:  '1540984560798666812',
-  MOD_LOG:    '1540984563776364585',
-  MESSAGE:    '1540991170740752474',
-  MEMBER:     '1540991173596942406',
-  SERVER:     '1540991176335687720',
-};
-const MEMBER_ROLE = 'Member';
-const log = (...a) => console.log(new Date().toISOString(), 'LOG:', ...a);
-const err = (...a) => console.log(new Date().toISOString(), 'ERR:', ...a);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Audit fetch dedupe: bursts of leaves/kicks (raid, mass-mod) share ONE fetch per
 // guild+type within a short window instead of N REST calls. Bounded map, TTL cleanup.
@@ -167,7 +166,7 @@ async function sendEmbed(chId, embed) {
     const g = await client.guilds.fetch(GUILD);
     const c = await g.channels.fetch(chId);
     if (c?.isTextBased()) await c.send({ embeds: [embed] });
-  } catch (e) { err('send', chId.slice(-4), e.message); throw e; }
+  } catch (e) { err('send', String(chId).slice(-4), e.message); throw e; }
 }
 
 const client = new Client({
@@ -184,7 +183,7 @@ const client = new Client({
 });
 
 // ——— Pipeline ——— single Gateway Runtime, 5 independent queues, priority moderation > member > server > voice > message
-const pipeline = new EventPipeline({ client, channels: CH, getAudit, sendEmbed, log, err });
+const pipeline = new EventPipeline({ client, channels: CH, getAudit, sendEmbed, log, err, timing });
 globalThis.__pipeline = pipeline;
 // health state — every 20s, lightweight, no sensitive data
 try { startHealthWatcher(() => pipeline.getMetrics(), 20000); } catch {}
@@ -196,39 +195,26 @@ pipeline.enqueue = (cat, ev) => {
 };
 
 client.once(Events.ClientReady, c => {
-  log(`READY as ${c.user.tag} — 6 log targets`, JSON.stringify(CH));
-  log('pipeline ready — 5 queues (moderation > member > server > voice > message)');
+  log(`READY as ${c.user.tag} — guild ${GUILD} — 6 log targets from control-plane.json`);
+  log(`pipeline ready — 5 queues (moderation > member > server > voice > message), timing ${JSON.stringify(timing)}`);
 });
 
 // ——— Helpers: normalize → pipeline.enqueue (no direct fetch/send in listeners) ———
 
-// Natural join → pipeline member queue handles auto-role? keep auto-role here but enqueue log via pipeline
+// Join: immediate auto-role (config-driven, not a log), join log via pipeline member queue
 client.on(Events.GuildMemberAdd, async m => {
-  // auto-role is immediate (not log), but log goes via pipeline
-  try {
-    const role = m.guild.roles.cache.find(r => r.name === MEMBER_ROLE);
-    if (role) { await m.roles.add(role); log('auto-role', m.user.tag); }
-  } catch (e) { err('auto-role', e.message); }
-  // pipeline: join-leave is treated as moderation-priority? use member queue for join log
-  const ev = pipeline.normalize ? pipeline.normalize('memberAdd', { targetId: m.id, targetTag: m.user.tag, thumb: m.user.displayAvatarURL(), guildId: m.guild.id, member: m }) : null;
-  // Directly enqueue to pipeline's member queue with pre-built embed data
+  if (autoroleEnabled) {
+    try {
+      const role = m.guild.roles.cache.find(r => r.name === MEMBER_ROLE);
+      if (role) { await m.roles.add(role); log('auto-role', m.user.tag); }
+    } catch (e) { err('auto-role', e.message); }
+  }
   pipeline.enqueue('member', {
     type: 'join',
     targetId: m.id, targetTag: m.user.tag, thumb: m.user.displayAvatarURL(),
     guildId: m.guild.id,
-    color: 0x57f287, title: '📥 دخول عضو جديد',
-    roles: [], // not used for join
-    _raw: m
   });
-  // Actually, for join we want JOIN_LEAVE channel, not MEMBER — handle specially via pipeline's member handler?
-  // To keep pipeline separation, we push a custom event that pipeline will route to JOIN_LEAVE
-  // For now, also handle via pipeline's moderation batch? We'll just let pipeline handle join as member category but override channel
-  // Simpler: handle join log directly via pipeline's member queue but with custom channel
-  // We'll instead use pipeline's internal queue for joins-leaves as 'member' with flag
 });
-
-// We override pipeline's handleMember to also handle joins — easier to just send directly via pipeline's sendEmbed for join/leave
-// To keep listeners thin, we delegate all audit/send to pipeline, so we just enqueue raw Discord objects
 
 // Voice — normalize and enqueue
 client.on(Events.VoiceStateUpdate, async (o, n) => {

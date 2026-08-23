@@ -1,74 +1,34 @@
 #!/usr/bin/env node
 // config-manager.mjs — lifecycle: staged → validated → diffed → resource-validated → applied → health-checked → rollback
-import { readFileSync, writeFileSync, existsSync, unlinkSync, renameSync, statSync, appendFileSync, copyFileSync, openSync, closeSync, fsyncSync } from 'node:fs';
+// Since v1.0.0 the Zod schema lives in lib/config.mjs (shared with the gateway
+// runtime), env access goes through lib/env, and atomic writes are shared.
+import { readFileSync, existsSync, unlinkSync, copyFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { z } from 'zod';
+import { controlPlaneSchema, DEFAULT_CONTROL_PLANE_PATH } from './lib/config.mjs';
+import { requireEnv } from './lib/env.mjs';
+import { atomicWriteJson } from './lib/atomic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CP = join(__dirname, 'control-plane.json');
+const CP = DEFAULT_CONTROL_PLANE_PATH;
 const STAGED = join(__dirname, 'control-plane.staged.json');
 const STATE = join(__dirname, 'bot-state.json');
 const LOG = join(__dirname, 'config-lifecycle.log');
-
-const channelId = z.string().regex(/^\d{17,20}$/);
-const schema = z.object({
-  schemaVersion: z.number().int().min(1),
-  gateway: z.object({
-    tokenEnv: z.literal('DISCORD_TOKEN'),
-    singleRuntimeOnly: z.boolean(),
-    allowedRuntimes: z.array(z.enum(['logger','omnicord'])),
-    defaultRuntime: z.enum(['logger','omnicord'])
-  }),
-  supervisor: z.object({
-    pidFile: z.string().min(1),
-    lockFile: z.string().min(1),
-    stateFile: z.string().min(1),
-    logFile: z.string().min(1),
-    staleLockMs: z.number().int().min(5000).max(120000),
-    gracefulStopMs: z.number().int().min(1000).max(30000),
-    verifyCmdline: z.boolean()
-  }),
-  permissions: z.object({
-    ownerId: z.string().regex(/^\d{17,20}$/),
-    controlPlaneAllowedRoles: z.array(z.string().min(1)),
-    requireAuditForModLog: z.boolean()
-  }),
-  logging: z.object({
-    channels: z.object({
-      JOIN_LEAVE: channelId,
-      VOICE_LOG: channelId,
-      MOD_LOG: channelId,
-      MESSAGE: channelId,
-      MEMBER: channelId,
-      SERVER: channelId
-    }),
-    debounceMs: z.number().int().min(500).max(10000),
-    batchMs: z.number().int().min(500).max(20000),
-    suppressMs: z.number().int().min(1000).max(30000)
-  })
-});
 
 function logLifecycle(source, action, result, detail=''){
   const line = `${new Date().toISOString()} [lifecycle] source=${source} action=${action} result=${result} ${detail}`;
   console.log(line);
   try{ appendFileSync(LOG, line+'\n'); }catch{}
 }
-function atomicWriteJson(path, data){
-  // fs.rename overwrites destination atomically on Windows; pre-unlink removed (crash window)
-  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
-  const fd = openSync(tmp, 'w');
-  writeFileSync(fd, JSON.stringify(data, null, 2));
-  fsyncSync(fd);
-  closeSync(fd);
-  renameSync(tmp, path);
-}
 function loadJson(path){
   return JSON.parse(readFileSync(path,'utf8'));
 }
 function validateFile(path){
+  if(!existsSync(path)){
+    throw new Error(`config file not found: ${path} — copy control-plane.example.json and edit it (see README)`);
+  }
   const data = loadJson(path);
-  const parsed = schema.safeParse(data);
+  const parsed = controlPlaneSchema.safeParse(data);
   if(!parsed.success){
     const errs = parsed.error.issues.map(i=> `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new Error(`schema validation failed: ${errs}`);
@@ -96,9 +56,7 @@ function diffConfigs(oldData, newData){
 }
 async function resourceValidate(data){
   // check Discord channels/roles exist via REST (read-only)
-  const env = readFileSync(join(__dirname,'.env'),'utf8');
-  const token = env.match(/DISCORD_TOKEN\s*=\s*(.+)/)[1].trim();
-  const guildId = env.match(/OMNICORD_GUILD\s*=\s*(.+)/)[1].trim();
+  const { DISCORD_TOKEN: token, OMNICORD_GUILD: guildId } = requireEnv(['DISCORD_TOKEN','OMNICORD_GUILD']);
   const H = {Authorization:`Bot ${token}`};
   // check channels
   const channelsRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`,{headers:H});
@@ -137,8 +95,7 @@ async function healthCheck(){
     if(!alive) throw new Error(`gateway pid ${lock.pid} not alive`);
     // check one channel fetch
     const data = loadJson(CP);
-    const env = readFileSync(join(__dirname,'.env'),'utf8');
-    const token = env.match(/DISCORD_TOKEN\s*=\s*(.+)/)[1].trim();
+    const { DISCORD_TOKEN: token } = requireEnv(['DISCORD_TOKEN']);
     const H = {Authorization:`Bot ${token}`};
     const chId = data.logging.channels.MOD_LOG;
     const r = await fetch(`https://discord.com/api/v10/channels/${chId}`,{headers:H});

@@ -1,6 +1,7 @@
-import { writeFileSync, openSync, closeSync, fsyncSync, unlinkSync, renameSync, readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { atomicWriteJson } from './lib/atomic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HEALTH_FILE = join(__dirname, 'health-state.json');
@@ -9,16 +10,6 @@ const CP_FILE = join(__dirname, 'control-plane.json');
 
 let lastError = null;
 let lastWarnAt = 0;
-
-function atomicWriteJson(path, data) {
-  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
-  const fd = openSync(tmp, 'w');
-  writeFileSync(fd, JSON.stringify(data, null, 2));
-  try { fsyncSync(fd); } catch {}
-  closeSync(fd);
-  try { unlinkSync(path); } catch {}
-  renameSync(tmp, path);
-}
 
 function safeReadJson(path, fallback=null) {
   try { return JSON.parse(readFileSync(path,'utf8')); } catch { return fallback; }
