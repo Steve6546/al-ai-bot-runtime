@@ -43,8 +43,7 @@ export function buildHealthState({ pipelineMetrics, lastEvent, manualCircuit } =
     circuits: manualCircuit || null,
     lastEvent: lastEvent ? { ts: lastEvent.ts, type: lastEvent.type } : null, // only timestamp/type, no user data
     lastError: lastError ? { ts: lastError.ts, category: lastError.category, code: String(lastError.code).slice(0,80) } : null,
-    lastConfigLifecycle: safeReadJson(join(__dirname, 'config-lifecycle.log') ? null : null) || null, // will be overwritten below
-    // lastConfig from lifecycle log tail
+    lastConfigLifecycle: null, // replaced below with the last lifecycle log line
   };
   // lastConfig lifecycle: read last line of config-lifecycle.log
   try {

@@ -3,6 +3,36 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] — 2026-08-23
+
+Final quality audit on top of v1.0.0. Every change is backed by a proven defect
+or an official-documentation finding; no cosmetic rewrites.
+
+### Fixed
+- **Moderation events were silently lost instead of persisted**: events carrying
+  raw Discord structures (`GuildMember` on leave/kick, audit-actor `User`) hit
+  circular client references in `JSON.stringify`, so `failed-events.jsonl`
+  writes failed silently — violating the "moderation is never dropped"
+  guarantee. `sanitizeForFailed` now keeps primitives only (plus `actorId` /
+`authorId` identifiers) and persistence always succeeds. Regression-tested by
+  `test-stability-fixes.mjs` T12, which failed before the fix and passes after.
+
+### Changed
+- Removed the **GuildPresences** privileged intent: the runtime has no
+  `presenceUpdate` listener, and per the discord.js guide that intent only
+  adds gateway bandwidth (one fewer privileged toggle in the Developer Portal).
+  `GuildModeration` stays — `guildBanAdd`/`guildBanRemove` require it.
+- Added a **message-cache sweeper** (sweep every 5 minutes, lifetime 30 minutes;
+  units in seconds per the official guide's Cache Customization page) so memory
+  stays flat on busy guilds — edit/delete logging only needs recent messages.
+
+### Removed
+- Dead code proven unused by search: `checkPid`/`isAliveSafe` in
+  `bot-supervisor.mjs` (no call sites), the unused `setLastError` import in
+  `autorole-logger.mjs`, and a no-op `safeReadJson(... ? null : null)`
+  expression in `health-state.mjs`. The supervisor now uses the shared
+  `lib/atomic.mjs` write instead of its last local copy.
+
 ## [1.0.0] — 2026-08-23
 
 First stable release. Focus: make the runtime genuinely config-driven, unify the

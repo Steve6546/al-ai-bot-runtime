@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // bot-supervisor.mjs — Single Gateway Runtime manager (Phase 4 + stability)
-import { existsSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, appendFileSync, renameSync, fsyncSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, appendFileSync, fsyncSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { verifyProcess } from './process-verification.mjs';
 import { gatewayLogPath } from './lib/paths.mjs';
+import { atomicWriteJson } from './lib/atomic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PID_FILE = join(__dirname, '.bot.pid');
@@ -25,30 +26,9 @@ function log(msg, extra='') {
   console.log(line);
   try { appendFileSync(LOG_FILE, line+'\n'); } catch {}
 }
-function atomicWriteJson(path, data) {
-  // fs.rename overwrites existing destination atomically on Windows (MoveFileEx);
-  // pre-unlink removed — it created a crash window where old config was already gone.
-  const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${randomUUID().slice(0,6)}`;
-  const fd = openSync(tmp, 'w');
-  writeFileSync(fd, JSON.stringify(data, null, 2));
-  try { fsyncSync(fd); } catch {}
-  closeSync(fd);
-  renameSync(tmp, path);
-}
 function readState(){ try{ return JSON.parse(readFileSync(STATE_FILE,'utf8')); }catch{ return {runtime:null,pid:null}; } }
 function writeState(s){ atomicWriteJson(STATE_FILE, {...s, updatedAt:new Date().toISOString()}); }
 
-// Fail-safe verification: returns alive/dead/unknown
-function checkPid(pid, expectedScript=null) {
-  const v = verifyProcess(pid, expectedScript);
-  // log decision
-  if (v.state === 'unknown') log(`verify pid ${pid} => unknown (${v.method}: ${v.reason.slice(0,80)})`);
-  return v;
-}
-function isAliveSafe(pid, expectedScript=null) {
-  const v = verifyProcess(pid, expectedScript);
-  return v.state === 'alive';
-}
 function isLockValid(lock){
   if(!lock || !lock.pid) return { valid:false, reason:'no pid' };
   const v = verifyProcess(lock.pid, lock.mode==='omnicord' ? 'dist/index.js' : 'autorole-logger.mjs');

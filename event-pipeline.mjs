@@ -97,11 +97,21 @@ export class EventPipeline {
   }
 
   sanitizeForFailed(ev) {
-    const copy = { ...ev };
-    delete copy.thumb;
+    // Keep only primitives. Live Discord structures (GuildMember on
+    // leaveOrKick, User audit actors, Role/Channel on server events) carry
+    // circular client references — JSON.stringify would throw and the event
+    // would be LOST, violating the "moderation is never dropped" guarantee.
+    const copy = {};
+    for (const [k, v] of Object.entries(ev)) {
+      if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) copy[k] = v;
+      else if (Array.isArray(v) && v.every(x => x === null || ['string', 'number', 'boolean'].includes(typeof x))) copy[k] = v.slice(0, 20);
+    }
+    delete copy.thumb; // avatar URLs are personal data, not diagnostics
     if (copy.content) copy.content = String(copy.content).slice(0, 500);
     if (copy.before) copy.before = String(copy.before).slice(0, 300);
     if (copy.after) copy.after = String(copy.after).slice(0, 300);
+    if (ev.actor?.id) copy.actorId = ev.actor.id;
+    if (ev.author?.id) copy.authorId = ev.author.id;
     // never log token
     return copy;
   }

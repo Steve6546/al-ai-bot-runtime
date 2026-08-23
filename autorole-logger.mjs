@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { Client, GatewayIntentBits, Partials, Events } from 'discord.js';
 import { EventPipeline } from './event-pipeline.mjs';
 import { startRotationWatcher } from './log-rotation.mjs';
-import { startHealthWatcher, setLastError, setLastEvent } from './health-state.mjs';
+import { startHealthWatcher, setLastEvent } from './health-state.mjs';
 import { verifyProcess } from './process-verification.mjs';
 import { resolveRuntimeConfig } from './lib/config.mjs';
 import { gatewayLogPath } from './lib/paths.mjs';
@@ -170,16 +170,27 @@ async function sendEmbed(chId, embed) {
 }
 
 const client = new Client({
+  // GuildPresences is deliberately absent: the runtime has no presenceUpdate
+  // listener, and that privileged intent only adds gateway bandwidth.
+  // GuildModeration stays — guildBanAdd/guildBanRemove require it.
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
+  // Bounded message cache: edit/delete logs need recently cached messages
+  // only, so entries older than 30 minutes are swept every 5 minutes
+  // (units are seconds — discord.js guide: Cache Customization).
+  sweepers: {
+    messages: {
+      interval: 300,
+      lifetime: 1800,
+    },
+  },
 });
 
 // ——— Pipeline ——— single Gateway Runtime, 5 independent queues, priority moderation > member > server > voice > message

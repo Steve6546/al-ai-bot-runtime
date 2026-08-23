@@ -118,6 +118,34 @@ const check = (name, cond, detail = '') => {
   }
 }
 
+// ——— T12: failed-events persistence survives raw Discord objects ———
+// Moderation events can carry live structures (GuildMember on leaveOrKick,
+// User as audit actor) whose client references are circular. If those objects
+// reached JSON.stringify, persistence would throw and the event would be
+// LOST silently — violating the "moderation is never dropped" guarantee.
+{
+  unlinkSync(FAILED_FILE);
+  const circular = { tag: 'circ', client: null };
+  circular.client = { self: circular }; // mimics discord.js structure cycles
+  const mockClient = { guilds: { fetch: async () => { throw new Error('guild fetch failed'); } } };
+  const channels = { MOD_LOG:'mod', MEMBER:'m', SERVER:'s', VOICE_LOG:'v', MESSAGE:'msg', JOIN_LEAVE:'j' };
+  const p = new EventPipeline({
+    client: mockClient, channels,
+    getAudit: async () => null,
+    sendEmbed: async () => {},
+    log: () => {}, err: () => {},
+    maxLengths: { moderation: 10 },
+    timing: { batchMs: 200, debounceMs: 100, suppressMs: 1000 },
+  });
+  p.enqueue('moderation', { type: 'leaveOrKick', targetId: 'c1', targetTag: 'circ', thumb: null, guildId: 'g', member: circular });
+  await sleep(4000);
+  const entries = failedEntries();
+  const found = entries.filter(e => e.event?.targetId === 'c1');
+  check('T12 event with circular raw object persisted (not silently lost)', found.length > 0,
+    `${entries.length} lines persisted`);
+  check('T12 persisted line is parseable and free of raw member object', found.length > 0 && found.every(e => e.event.member === undefined));
+}
+
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES PRESENT'} — pass=${pass} fail=${fail}`);
 // Give in-flight socket teardown a moment before the forced exit (this file
 // must exit explicitly — EventPipeline timers keep the loop alive).

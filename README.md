@@ -23,7 +23,7 @@ Model/Agent/MCP never talk to the Gateway directly and never execute OS commands
 ## Prerequisites
 - **Windows 10/11** (the supervisor uses PowerShell CIM/WMI and `taskkill`; it is not cross-platform)
 - **Node.js ≥ 20**
-- A Discord bot application + guild invite with intents: `Guilds, GuildMembers, GuildMessages, GuildVoiceStates, GuildPresences, MessageContent, GuildModeration`
+- A Discord bot application + guild invite with intents: `Guilds, GuildMembers, GuildMessages, GuildVoiceStates, MessageContent, GuildModeration` — `GuildPresences` is **not** needed (no presence listener; it is privileged and only adds bandwidth)
 - The Omnicord repository cloned alongside (at least its `dist/` build) only if you want the `omnicord` runtime — the default `logger` runtime needs nothing beyond `discord.js`/`zod`/`dotenv`
 
 ## Configuration — where things live
@@ -84,8 +84,9 @@ node config-manager.mjs apply --source=manual
 - `moderation` never dropped — overflow is persisted to `failed-events.jsonl`; `voice/message` may be merged/dropped under pressure (counter `dropped`)
 - Event-driven + 350 ms rate limiter between Discord sends
 - Per-destination circuit breaker: `3 failures → open 15s` (isolated, not global)
-- **Bounded retries on both moderation paths** (since v1.0.0): queue-level and batched-flush (`flushMod`) retry at most twice with backoff, then persist to `failed-events.jsonl` — never drop, never retry forever
+- **Bounded retries on both moderation paths** (since v1.0.0): queue-level and batched-flush (`flushMod`) retry at most twice with backoff, then persist to `failed-events.jsonl` — never drop, never retry forever. Persisted events are sanitized to primitives (no raw Discord objects, no avatar URLs) so serialization can never silently lose them (since v1.0.1)
 - Metrics: `queueDepth, oldestAgeMs, sent, failed, retried, dropped, circuitState`
+- **Bounded memory** (since v1.0.1): the message cache is swept every 5 minutes (entries older than 30 minutes removed) — edit/delete logging only needs recent messages, so memory stays flat on busy guilds
 
 ## Integration adapter (local only)
 - `POST http://127.0.0.1:3415/adapter/request` — **mandatory** headers:
