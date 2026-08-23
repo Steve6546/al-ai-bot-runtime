@@ -1,0 +1,20 @@
+# Never bake secrets or machine-local state into the image — mount or pass
+# them at runtime (see README Deployment > Docker).
+node_modules
+.git
+.env
+.env.*
+!.env.example
+control-plane.json
+control-plane.staged.json
+control-plane.json.bak.*
+*.log
+*.log.*
+*.pid
+*.lock
+bot-state.json
+health-state.json
+failed-events.jsonl
+adapter-seen.jsonl
+backups/
+*.tmp.*

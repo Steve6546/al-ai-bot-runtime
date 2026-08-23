@@ -1,3 +1,6 @@
+// process-verification.mjs — Windows implementation of process verification
+// (CIM → tasklist → Get-Progress with double confirmation). Dispatched from
+// lib/platform.mjs, which carries the POSIX (/proc + signals) implementation.
 import { execSync } from 'node:child_process';
 
 function tryGetCim(pid) {

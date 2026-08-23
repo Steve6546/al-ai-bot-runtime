@@ -9,6 +9,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
+import { forceKillTree } from '../lib/platform.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const ADAPTER_URL = 'http://127.0.0.1:3415/adapter/request';
@@ -38,6 +39,26 @@ function ensureEnvFile() {
 async function main() {
   run('node tools/check.mjs');
   run('node test-config.mjs');
+  run('node test-platform.mjs');
+
+  // Entrypoint fail-fast: with no control-plane.json, `node index.js` must
+  // exit non-zero with a clear FATAL message BEFORE any Discord traffic.
+  // Skipped when a real config exists (the gateway would then start for real).
+  if (!existsSync(join(root, 'control-plane.json'))) {
+    console.log('\n>>> node index.js (expect fast config failure)');
+    let out = '';
+    try {
+      out = execSync('node index.js', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
+      throw new Error('entrypoint exited 0 without control-plane.json — should have failed fast');
+    } catch (e) {
+      out = String(e.stdout || '') + String(e.stderr || '');
+      if (!/FATAL/.test(out)) throw new Error(`entrypoint did not fail with a clear message: ${out.slice(0, 200)}`);
+      console.log('PASS entrypoint fails fast with clear config error (no Discord contact)');
+    }
+  } else {
+    console.log('\n[runner] skip entrypoint fail-fast (control-plane.json present)');
+  }
+
   run('node test-pipeline.mjs');
   ensureEnvFile();
 
@@ -54,7 +75,7 @@ async function main() {
     }
     if (!up) {
       console.error('[runner] adapter did not come up on 127.0.0.1:3415');
-      if (child.pid) { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} }
+      if (child.pid) forceKillTree(child.pid);
       process.exit(1);
     }
   } else {
@@ -71,7 +92,7 @@ async function main() {
       console.log('\n[runner] stopping adapter...');
       try { child.kill(); } catch {}
       await new Promise(r => setTimeout(r, 1500));
-      try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+      forceKillTree(child.pid);
     }
   }
   console.log('\nALL TEST SUITES COMPLETED');

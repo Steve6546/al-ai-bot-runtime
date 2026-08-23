@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// bot-supervisor.mjs — Single Gateway Runtime manager (Phase 4 + stability)
+// bot-supervisor.mjs — Single Gateway Runtime manager (Windows + Linux).
+// All platform-specific behaviour (process verification, detached spawn,
+// force-kill, cmdline read) lives in lib/platform.mjs — this file uses only
+// Node standard APIs on top of it, so the same commands run on Windows,
+// Linux/VPS and containers.
 import { existsSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, appendFileSync, fsyncSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { verifyProcess } from './process-verification.mjs';
+import { verifyProcess, spawnDetachedNode, forceKillTree, readCmdline, isWindows } from './lib/platform.mjs';
 import { gatewayLogPath } from './lib/paths.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 
@@ -105,38 +108,21 @@ async function gracefulStop(pid, timeout=6000, expectedScript=null){
   await new Promise(r=>setTimeout(r,600));
   const cur2 = verifyProcess(pid);
   if(cur2.state==='dead') return true;
-  try{ execSync(`taskkill /PID ${pid} /F`,{stdio:'ignore'});}catch{}
+  forceKillTree(pid);
   await new Promise(r=>setTimeout(r,600));
   const final = verifyProcess(pid);
-  log(`taskkill result pid ${pid} state=${final.state}`);
+  log(`force-kill result pid ${pid} state=${final.state}`);
   return final.state==='dead';
 }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
 async function spawnRuntime(mode){
   const rt = RUNTIME[mode];
   if(!rt) throw new Error(`unknown runtime ${mode}`);
   const scriptPath = join(__dirname, rt.script);
-  const argsStr = (rt.args||[]).join(' ');
-  // gatewayLogPath() creates the directory if missing so the redirect can never fail
+  // gatewayLogPath() creates the directory if missing so output can never fail
   const logOut = gatewayLogPath();
-  const cmdLine = `cmd /c cd /d "${__dirname}" && node "${scriptPath}" ${argsStr} > "${logOut}" 2>&1`;
-  const psSafe = cmdLine.replace(/'/g,"''");
-  const wmiOut = execSync(`powershell -NoProfile -Command "$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${psSafe}'}; Write-Output $r.ProcessId"`,{encoding:'utf8'}).trim();
-  const cmdPid = Number(wmiOut.split(/\s+/).pop());
-  let nodePid = cmdPid;
-  try{
-    for(let i=0;i<6;i++){
-      await sleep(400);
-      const q = execSync(`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"ParentProcessId=${cmdPid}\\" | Where-Object { $_.CommandLine -like '*${rt.script}*' } | Select-Object -ExpandProperty ProcessId"`,{encoding:'utf8'}).trim();
-      const cand = Number(q.split(/\s+/).pop());
-      const vv = verifyProcess(cand, rt.script);
-      if(cand && vv.state==='alive'){ nodePid=cand; break; }
-    }
-  }catch{}
-  const tracked = verifyProcess(nodePid).state==='alive' ? nodePid : cmdPid;
-  log(`spawned ${mode} via WMI cmdPid=${cmdPid} nodePid=${nodePid} tracked=${tracked}`);
-  return tracked;
+  const pid = await spawnDetachedNode({ scriptPath, args: rt.args || [], logOut, cwd: __dirname, expectedScript: rt.script });
+  log(`spawned ${mode} pid=${pid} (${isWindows ? 'wmi wrapper' : 'detached node'})`);
+  return pid;
 }
 async function waitForReady(expectedPid, timeout=12000){
   const start=Date.now();
@@ -182,7 +168,7 @@ async function status(){
   try{ const h=JSON.parse(readFileSync(join(__dirname,'health-state.json'),'utf8')); console.log('health:', JSON.stringify({gateway:h.runtime?.gatewayState, uptime:h.runtime?.uptimeSec, queues:h.pipeline?.queueDepth}).slice(0,200)); }catch{}
 }
 function getCmdFallback(pid){
-  try{ return execSync(`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"ProcessId=${pid}\\" | Select-Object -ExpandProperty CommandLine"`,{encoding:'utf8',timeout:4000}).trim().slice(0,160); }catch{ return ''; }
+  return readCmdline(pid).slice(0,160);
 }
 function readLock(){ try{ return JSON.parse(readFileSync(LOCK_FILE,'utf8'));}catch{return null;}}
 

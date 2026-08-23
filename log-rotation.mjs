@@ -1,8 +1,12 @@
 import { existsSync, statSync, renameSync, unlinkSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
+import { readEnvInt } from './lib/env.mjs';
 
-const MAX_BYTES = 10 * 1024 * 1024; // 10MB
-const KEEP = 14;
+// Optional resource knobs (clamped; unset/invalid falls back to the default):
+// LOG_MAX_BYTES (1MB-100MB) and LOG_RETENTION_FILES (1-100) keep rotation
+// predictable on small VPSes and containers.
+const MAX_BYTES = readEnvInt('LOG_MAX_BYTES', 10 * 1024 * 1024, 1024 * 1024, 100 * 1024 * 1024);
+const KEEP = readEnvInt('LOG_RETENTION_FILES', 14, 1, 100);
 
 function shouldRotate(filePath) {
   try {

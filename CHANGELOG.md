@@ -3,6 +3,52 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.2] — 2026-08-23
+
+Cross-platform support on top of v1.0.1. Single Gateway Runtime, atomic lock,
+pipeline behaviour and the control-plane contract are unchanged.
+
+### Added
+- **`lib/platform.mjs`** — one process API for the supervisor with two
+  implementations: POSIX (`/proc/<pid>/cmdline`, signal-0 probes, `SIGKILL`,
+  direct detached spawn — no PowerShell/WMI/taskkill anywhere) and the existing
+  proven Windows behaviour (WMI spawn wrapper, CIM/tasklist verification,
+  `taskkill /T /F`). `bot-supervisor.mjs` now contains **zero platform
+  branches**; `process-verification.mjs` is explicitly the Windows layer.
+- **`index.js` entrypoint** (8 chars — under Pterodactyl-style 16-char
+  `MAIN_FILE` caps): plain JavaScript ESM, no TypeScript/ts-node/build step.
+  Runs the gateway in the foreground so container/panel signals (SIGTERM from
+  `docker stop`/panel stop, SIGINT from Ctrl+C) reach it directly; graceful
+  shutdown and lock cleanup unchanged. `npm start` added.
+- **`Dockerfile` + `.dockerignore`** — node:20-slim, `npm ci --omit=dev`,
+  exec-form CMD (node is PID 1, SIGTERM-safe). Secrets and local config are
+  never baked into the image.
+- **Optional resource knobs** (clamped, never required, defaults preserved):
+  `HEALTH_INTERVAL_MS` (5000–300000, default 20000), `LOG_MAX_BYTES`
+  (1MB–100MB, default 10MB), `LOG_RETENTION_FILES` (1–100, default 14),
+  `MESSAGE_CACHE_SWEEP_SECONDS` (300–86400, default 1800) via the new
+  `readEnvInt` in `lib/env.mjs`.
+- **`test-platform.mjs`** — exercises the real platform lifecycle (detached
+  spawn → verify with command match → force-kill → verify dead) plus
+  PID-reuse-guard, test-hook and entrypoint contracts on whichever OS runs
+  the suite. The test runner now also asserts `node index.js` fails fast with
+  a clear message (before any Discord traffic) when config is missing.
+- README **Deployment** section: Windows, Linux/VPS, Docker, Pterodactyl
+  (recommended startup command `node /home/container/index.js`), resource
+  profile (256 MB recommended / 128 MB minimum).
+
+### Changed
+- `gracefulStop` last-resort kill now uses `taskkill /T /F` (tree) on Windows
+  via the platform layer — previously the child node process of the cmd
+  wrapper could survive a `/F`-only kill.
+
+### Tested
+- Windows: full suite (`npm ci`, `npm run check`, `npm test`) including the
+  live spawn/kill lifecycle through the Windows layer. POSIX implementation is
+  contract-tested (signal-probe fallback verified) but was **not** executed on
+  a real Linux host in this environment (WSL service unavailable, no Docker) —
+  see README for what each platform claim rests on.
+
 ## [1.0.1] — 2026-08-23
 
 Final quality audit on top of v1.0.0. Every change is backed by a proven defect

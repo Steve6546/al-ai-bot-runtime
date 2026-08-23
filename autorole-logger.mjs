@@ -13,6 +13,7 @@ import { startRotationWatcher } from './log-rotation.mjs';
 import { startHealthWatcher, setLastEvent } from './health-state.mjs';
 import { verifyProcess } from './process-verification.mjs';
 import { resolveRuntimeConfig } from './lib/config.mjs';
+import { readEnvInt } from './lib/env.mjs';
 import { gatewayLogPath } from './lib/paths.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 import { randomUUID } from 'node:crypto';
@@ -32,6 +33,9 @@ try {
   process.exit(1);
 }
 const { token: TOKEN, guildId: GUILD, channels: CH, timing, autoroleEnabled, memberRoleName: MEMBER_ROLE } = RUNTIME;
+// Optional resource knobs (clamped, never required) — small-VPS friendly.
+const HEALTH_INTERVAL_MS = readEnvInt('HEALTH_INTERVAL_MS', 20000, 5000, 300000);
+const MESSAGE_CACHE_SWEEP_SECONDS = readEnvInt('MESSAGE_CACHE_SWEEP_SECONDS', 1800, 300, 86400);
 const log = (...a) => console.log(new Date().toISOString(), 'LOG:', ...a);
 const err = (...a) => console.log(new Date().toISOString(), 'ERR:', ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -183,12 +187,13 @@ const client = new Client({
   ],
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
   // Bounded message cache: edit/delete logs need recently cached messages
-  // only, so entries older than 30 minutes are swept every 5 minutes
-  // (units are seconds — discord.js guide: Cache Customization).
+  // only. Lifetime defaults to 30 minutes and is tunable via
+  // MESSAGE_CACHE_SWEEP_SECONDS; sweep interval is 5 minutes (units are
+  // seconds — discord.js guide: Cache Customization).
   sweepers: {
     messages: {
       interval: 300,
-      lifetime: 1800,
+      lifetime: MESSAGE_CACHE_SWEEP_SECONDS,
     },
   },
 });
@@ -196,8 +201,8 @@ const client = new Client({
 // ——— Pipeline ——— single Gateway Runtime, 5 independent queues, priority moderation > member > server > voice > message
 const pipeline = new EventPipeline({ client, channels: CH, getAudit, sendEmbed, log, err, timing });
 globalThis.__pipeline = pipeline;
-// health state — every 20s, lightweight, no sensitive data
-try { startHealthWatcher(() => pipeline.getMetrics(), 20000); } catch {}
+// health state — default every 20s, lightweight, no sensitive data
+try { startHealthWatcher(() => pipeline.getMetrics(), HEALTH_INTERVAL_MS); } catch {}
 // also expose lastEvent helper for health
 const _origEnqueue = pipeline.enqueue.bind(pipeline);
 pipeline.enqueue = (cat, ev) => {

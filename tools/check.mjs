@@ -25,8 +25,9 @@ function listMjsFiles(dir) {
   return out;
 }
 
-// 1. syntax check every module
+// 1. syntax check every module (.mjs everywhere + the index.js entrypoint)
 const files = listMjsFiles(root);
+if (existsSync(join(root, 'index.js'))) files.push(join(root, 'index.js'));
 for (const f of files) {
   try {
     execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
@@ -34,6 +35,14 @@ for (const f of files) {
   } catch (e) {
     fail(`syntax ${f.slice(root.length + 1)}: ${String(e.stderr).slice(0, 200)}`);
   }
+}
+
+// 1b. entrypoint naming contract (Pterodactyl-style MAIN_FILE caps)
+{
+  const p = join(root, 'index.js');
+  if (!existsSync(p)) fail('index.js entrypoint missing');
+  else if ('index.js'.length > 16) fail('entrypoint name exceeds 16 chars');
+  else ok('entrypoint index.js present, name <= 16 chars');
 }
 
 // 2. JSON files parse (and the example validates against the shared schema)
