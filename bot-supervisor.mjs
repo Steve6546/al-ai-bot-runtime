@@ -257,6 +257,12 @@ async function stop(){
   } finally { releaseTxLock(); }
 }
 (async()=>{
+  // clean fail-fast for unknown modes (e.g. legacy --mode=omnicord) instead
+  // of an unhandled throw deep inside spawnRuntime
+  if((action==='start'||action==='restart') && !RUNTIME[mode]){
+    console.error(`FATAL: unknown runtime mode '${mode}' — available modes: ${Object.keys(RUNTIME).join(', ')}`);
+    process.exit(1);
+  }
   if(action==='status') await status();
   else if(action==='start') await start();
   else if(action==='restart'){
