@@ -5,16 +5,12 @@ node_modules
 .env
 .env.*
 !.env.example
-control-plane.json
-control-plane.staged.json
-control-plane.json.bak.*
 *.log
 *.log.*
 *.pid
 *.lock
 bot-state.json
 health-state.json
-failed-events.jsonl
 adapter-seen.jsonl
 backups/
 *.tmp.*

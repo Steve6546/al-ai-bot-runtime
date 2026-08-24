@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // integration-adapter.mjs — hardened local HTTP API (HMAC, persistent dedupe,
 // schema, post-auth rate limit, body limit). Secrets load through lib/env
-// (dotenv), handlers live in a registry, staged writes use the shared atomic
-// helper. v2 scope: getStatus / diagnose / readLogs only — the control-plane
-// config actions were removed with the logging system.
+// (dotenv) and handlers live in a registry. v2 scope: getStatus / diagnose /
+// readLogs only — the control-plane config actions were removed with the
+// logging system.
 import { createServer } from 'node:http';
 import { readFileSync, appendFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';

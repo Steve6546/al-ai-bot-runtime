@@ -304,5 +304,5 @@ async function stop(){
     } finally { releaseTxLock(); }
   }
   else if(action==='stop') await stop();
-  else console.log('Usage: node bot-supervisor.mjs --mode=logger|omnicord --action=start|stop|restart|status');
+  else console.log('Usage: node bot-supervisor.mjs --mode=gateway [--action=start|stop|restart|status]');
 })();
