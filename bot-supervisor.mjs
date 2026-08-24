@@ -4,7 +4,7 @@
 // force-kill, cmdline read) lives in lib/platform.mjs — this file uses only
 // Node standard APIs on top of it, so the same commands run on Windows,
 // Linux/VPS and containers.
-import { existsSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, appendFileSync, fsyncSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, openSync, closeSync, readSync, unlinkSync, statSync, appendFileSync, fsyncSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -19,10 +19,19 @@ const TX_LOCK = join(__dirname, '.supervisor.lock');
 const STATE_FILE = join(__dirname, 'bot-state.json');
 const LOG_FILE = join(__dirname, 'supervisor.log');
 
+// v2: one runtime — an always-online gateway presence (no logging). Legacy
+// 'logger' mode maps onto it; pre-v2 .bot.lock files still verify against
+// their original script so upgrades fail safe instead of bypassing locks.
 const RUNTIME = {
-  logger: { script: 'autorole-logger.mjs', name: 'logger' },
-  omnicord: { script: 'dist/index.js', args: ['--http'], name: 'omnicord' },
+  gateway: { script: 'gateway.mjs', name: 'gateway' },
 };
+const MODE_ALIASES = { logger: 'gateway' };
+function normalizeMode(m){ return MODE_ALIASES[m] || m; }
+function expectedScriptFor(mode){
+  if (mode === 'omnicord') return 'dist/index.js';
+  if (mode === 'logger') return 'autorole-logger.mjs'; // pre-v2 lock files
+  return 'gateway.mjs';
+}
 
 function log(msg, extra='') {
   const line = `${new Date().toISOString()} [supervisor] ${msg}${extra ? ' | '+extra : ''}`;
@@ -32,9 +41,26 @@ function log(msg, extra='') {
 function readState(){ try{ return JSON.parse(readFileSync(STATE_FILE,'utf8')); }catch{ return {runtime:null,pid:null}; } }
 function writeState(s){ atomicWriteJson(STATE_FILE, {...s, updatedAt:new Date().toISOString()}); }
 
+// Read only the tail of a file (last `bytes`). waitForReady polls the gateway
+// log every 500 ms during boot; reading the whole (up to 10 MB) file each tick
+// wasted CPU and memory for no benefit. Returns '' when unavailable.
+function readTail(path, bytes = 8192){
+  try{
+    const st = statSync(path);
+    const len = Math.min(st.size, bytes);
+    if(len <= 0) return '';
+    const fd = openSync(path, 'r');
+    try{
+      const buf = Buffer.alloc(len);
+      const got = readSync(fd, buf, 0, len, st.size - len);
+      return buf.toString('utf8', 0, got);
+    } finally { closeSync(fd); }
+  } catch { return ''; }
+}
+
 function isLockValid(lock){
   if(!lock || !lock.pid) return { valid:false, reason:'no pid' };
-  const v = verifyProcess(lock.pid, lock.mode==='omnicord' ? 'dist/index.js' : 'autorole-logger.mjs');
+  const v = verifyProcess(lock.pid, expectedScriptFor(lock.mode));
   if(v.state === 'alive') return { valid:true, reason:`alive via ${v.method}` };
   if(v.state === 'unknown') return { valid:false, reason:`unknown — treat as not dead`, unknown:true, detail:v };
   return { valid:false, reason:`dead via ${v.method}: ${v.reason}` };
@@ -129,10 +155,11 @@ async function waitForReady(expectedPid, timeout=12000){
   while(Date.now()-start<timeout){
     const lock = (()=>{ try{ return JSON.parse(readFileSync(LOCK_FILE,'utf8'));}catch{return null;}})();
     if(lock && String(lock.pid)===String(expectedPid)){
-      const vv = verifyProcess(lock.pid, 'autorole-logger.mjs');
+      const vv = verifyProcess(lock.pid, expectedScriptFor('gateway'));
       if(vv.state==='alive'){
         try{
-          const out = readFileSync(gatewayLogPath(),'utf8');
+          // tail-only read: the READY line is at the end of the boot output
+          const out = readTail(gatewayLogPath());
           if(out.includes('READY as')){ log(`readiness verified pid ${expectedPid}`); return true; }
         }catch{}
       } else if(vv.state==='unknown'){
@@ -146,7 +173,7 @@ async function waitForReady(expectedPid, timeout=12000){
 }
 
 const args = Object.fromEntries(process.argv.slice(2).map(a=>{ const [k,v]=a.replace(/^--/,'').split('='); return [k, v??true]; }));
-const mode = (args.mode||args.m||'logger').toLowerCase();
+const mode = normalizeMode((args.mode||args.m||'gateway').toLowerCase());
 const action = (args.action||args.a||'start').toLowerCase();
 
 async function status(){
@@ -155,7 +182,7 @@ async function status(){
   const pid=lock?.pid || state.pid;
   let alive=false,cmd='',detail='';
   if(pid){
-    const v=verifyProcess(pid, lock?.mode==='omnicord'?'dist/index.js':'autorole-logger.mjs');
+    const v=verifyProcess(pid, expectedScriptFor(lock?.mode));
     alive = v.state==='alive';
     cmd = v.cmd ? v.cmd.slice(0,160) : getCmdFallback(pid);
     detail = `state=${v.state} method=${v.method}`;
@@ -215,7 +242,7 @@ async function stop(){
     const state=readState();
     const pid = lock?.pid || state.pid || (existsSync(PID_FILE)?readFileSync(PID_FILE,'utf8').trim():null);
     if(!pid){ console.log('No PID to stop'); return; }
-    const expected = lock?.mode==='omnicord' ? 'dist/index.js' : (state.runtime==='omnicord' ? 'dist/index.js' : 'autorole-logger.mjs');
+    const expected = expectedScriptFor(lock?.mode ?? state.runtime);
     const ok=await gracefulStop(pid, 6000, expected);
     const curLock=readLock();
     if(curLock && String(curLock.pid)===String(pid)){
@@ -242,7 +269,7 @@ async function stop(){
         const chk = lock ? isLockValid(lock) : {valid: false, unknown: false};
         if(chk.valid){
           log(`restart: stopping old pid ${oldPid}`);
-          const expectedScript = lock?.mode==='omnicord' ? 'dist/index.js' : 'autorole-logger.mjs';
+          const expectedScript = expectedScriptFor(lock?.mode);
           const ok=await gracefulStop(oldPid, 6000, expectedScript);
           if(!ok) log(`WARNING old pid ${oldPid} may still be alive`);
           for(let i=0;i<5;i++){

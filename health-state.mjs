@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { atomicWriteJson } from './lib/atomic.mjs';
@@ -6,7 +6,6 @@ import { atomicWriteJson } from './lib/atomic.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HEALTH_FILE = join(__dirname, 'health-state.json');
 const STATE_FILE = join(__dirname, 'bot-state.json');
-const CP_FILE = join(__dirname, 'control-plane.json');
 
 let lastError = null;
 let lastWarnAt = 0;
@@ -15,44 +14,53 @@ function safeReadJson(path, fallback=null) {
   try { return JSON.parse(readFileSync(path,'utf8')); } catch { return fallback; }
 }
 
+// discord.js client.ws.status → semantic state. Status enum:
+// 0 Ready, 1 Connecting, 2 Reconnecting, 3 Idle, 4 Nearly, 5 Disconnected.
+function mapWsState(ws) {
+  if (typeof ws !== 'number') return null;
+  const names = ['ready', 'connecting', 'reconnecting', 'idle', 'nearly', 'disconnected'];
+  return names[ws] || null;
+}
+
 // No token, no secrets, no headers, no body, no message content, no user data
-export function buildHealthState({ pipelineMetrics, lastEvent, manualCircuit } = {}) {
+export function buildHealthState({ pipelineMetrics, lastEvent, manualCircuit, wsStatus } = {}) {
   const state = safeReadJson(STATE_FILE, {});
-  const cp = safeReadJson(CP_FILE, {});
   const mem = process.memoryUsage();
   const uptimeSec = Math.round(process.uptime());
-  // gateway lock info (non-sensitive)
-  let gateway = { state: 'unknown', pid: state.pid || null, runtime: state.runtime || null };
+  // Gateway state: the process's OWN websocket status is the authoritative
+  // signal ('connected' only when truly Ready). The lock file only corroborates
+  // pid/mode metadata; its presence alone no longer fakes a connection.
+  const wsState = mapWsState(typeof wsStatus === 'function' ? wsStatus() : wsStatus);
+  let gateway;
   try {
     const lock = safeReadJson(join(__dirname, '.bot.lock'), null);
-    if (lock) gateway = { state: 'connected', pid: lock.pid, runtime: lock.mode, startedAt: lock.startedAt };
-    else gateway.state = state.pid ? 'starting' : 'stopped';
-  } catch {}
+    gateway = {
+      state: wsState
+        ? (wsState === 'ready' ? 'connected' : wsState) // connected | connecting | reconnecting | idle | nearly | disconnected
+        : (lock ? 'lock-only' : (state.pid ? 'starting' : 'stopped')),
+      pid: lock?.pid ?? state.pid ?? null,
+      runtime: lock?.mode ?? state.runtime ?? null,
+    };
+    if (lock) gateway.startedAt = lock.startedAt;
+  } catch {
+    gateway = { state: 'unknown', pid: state.pid || null, runtime: state.runtime || null };
+  }
 
   const health = {
-    schemaVersion: cp.schemaVersion || 1,
+    schemaVersion: 1,
     runtime: {
       mode: state.runtime || null,
       nodePid: process.pid,
       gatewayPid: gateway.pid,
-      gatewayState: gateway.state, // connected | starting | stopped | unknown
+      gatewayState: gateway.state, // connected | connecting | reconnecting | idle | nearly | disconnected | lock-only | starting | stopped
       uptimeSec,
       memory: { rss: mem.rss, heapUsed: mem.heapUsed, heapTotal: mem.heapTotal, external: mem.external },
     },
-    pipeline: pipelineMetrics || null, // {queueDepth, oldestAgeMs, sent, failed, retried, dropped, circuitState}
+    pipeline: pipelineMetrics || null, // always null since the pipeline removal — kept for shape compatibility
     circuits: manualCircuit || null,
     lastEvent: lastEvent ? { ts: lastEvent.ts, type: lastEvent.type } : null, // only timestamp/type, no user data
     lastError: lastError ? { ts: lastError.ts, category: lastError.category, code: String(lastError.code).slice(0,80) } : null,
-    lastConfigLifecycle: null, // replaced below with the last lifecycle log line
   };
-  // lastConfig lifecycle: read last line of config-lifecycle.log
-  try {
-    if (existsSync(join(__dirname, 'config-lifecycle.log'))) {
-      const lines = readFileSync(join(__dirname, 'config-lifecycle.log'),'utf8').trim().split('\n').filter(Boolean);
-      const last = lines[lines.length-1];
-      if (last) health.lastConfigLifecycle = last.slice(0,500);
-    }
-  } catch {}
   return health;
 }
 
@@ -77,17 +85,17 @@ export function setLastEvent(type) {
 }
 
 let interval = null;
-export function startHealthWatcher(getPipelineMetrics, intervalMs = 20000) {
+export function startHealthWatcher(getPipelineMetrics, intervalMs = 20000, getWsStatus = null) {
   if (interval) clearInterval(interval);
   interval = setInterval(() => {
     try {
       const pm = getPipelineMetrics ? getPipelineMetrics() : null;
       const lastEvent = globalThis.__lastEvent || null;
-      updateHealthState({ pipelineMetrics: pm, lastEvent });
+      updateHealthState({ pipelineMetrics: pm, lastEvent, wsStatus: getWsStatus });
     } catch {}
   }, intervalMs);
   // initial
   setTimeout(() => {
-    try { updateHealthState({ pipelineMetrics: getPipelineMetrics ? getPipelineMetrics() : null }); } catch {}
+    try { updateHealthState({ pipelineMetrics: getPipelineMetrics ? getPipelineMetrics() : null, wsStatus: getWsStatus }); } catch {}
   }, 3000);
 }

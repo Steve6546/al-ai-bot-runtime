@@ -17,7 +17,7 @@ function sign(body, ts, nonce) {
   return createHmac('sha256', token).update(`${ts}.${nonce}.${body}`).digest('hex');
 }
 async function req({action, params, requestId, useHmac=true, badHmac=false, noToken=false, timestamp=Date.now(), nonce=randomUUID()}){
-  const body = JSON.stringify({requestId: requestId||`test-${Date.now()}-${Math.random()}`, identity:'owner', action, params, ownerApproval: action==='applyConfig' ? true : undefined});
+  const body = JSON.stringify({requestId: requestId||`test-${Date.now()}-${Math.random()}`, identity:'owner', action, params});
   const ts = String(timestamp);
   const sig = badHmac ? 'bad' : sign(body, ts, nonce);
   const headers = {
@@ -75,7 +75,7 @@ console.log('\n=== Test 5: large body >64KB ===');
 {
   // The server destroys the socket mid-upload; a compliant client sees either
   // a 413 response or a connection error — both prove the limit is enforced.
-  const largeBody = JSON.stringify({requestId:'large', identity:'owner', action:'suggestConfig', params:{data:'x'.repeat(70000)}});
+  const largeBody = JSON.stringify({requestId:'large', identity:'owner', action:'diagnose', params:{data:'x'.repeat(70000)}});
   const ts5=Date.now(), nonce5=randomUUID(), sig5=sign(largeBody, String(ts5), nonce5);
   let status = 0, err = null;
   try{
@@ -86,10 +86,10 @@ console.log('\n=== Test 5: large body >64KB ===');
   console.log(ok ? `PASS oversized body blocked (status=${status}${err ? ', socket destroyed: '+err : ''})` : `FAIL status=${status} no error`);
 }
 
-console.log('\n=== Test 6: invalid params (applyConfig with blocked key tokenEnv) ===');
+console.log('\n=== Test 6: invalid params (readLogs with non-numeric lines) ===');
 {
-  const r = await req({action:'applyConfig', params:{schemaVersion:1, tokenEnv:'evil'}});
-  console.log(r.status === 400 && r.json.error === 'invalid_params' ? 'PASS blocked key rejected' : `FAIL got ${r.status} ${JSON.stringify(r.json).slice(0,100)}`);
+  const r = await req({action:'readLogs', params:{ lines: 'abc' }});
+  console.log(r.status === 400 && r.json.error === 'invalid_params' ? 'PASS invalid params rejected' : `FAIL got ${r.status} ${JSON.stringify(r.json).slice(0,100)}`);
 }
 
 console.log('\n=== Test 7: blocked action ===');

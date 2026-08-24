@@ -1,27 +1,22 @@
 {
   "name": "al-ai-bot-runtime",
-  "version": "1.0.2",
-  "description": "Production-hardened Discord bot runtime — single Gateway, supervisor, pipeline, hardened adapter, config-driven, cross-platform (Windows/Linux/Docker)",
+  "version": "2.0.0",
+  "description": "Production-hardened Discord gateway runtime — single-instance always-online presence with supervisor, health telemetry and a hardened local adapter. Windows/Linux/Docker.",
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node index.js",
-    "start:gateway": "node bot-supervisor.mjs --mode=logger --action=start",
-    "start:logger": "node bot-supervisor.mjs --mode=logger --action=start",
-    "restart:gateway": "node bot-supervisor.mjs --mode=logger --action=restart",
-    "stop:gateway": "node bot-supervisor.mjs --mode=logger --action=stop",
+    "start:gateway": "node bot-supervisor.mjs --mode=gateway --action=start",
+    "restart:gateway": "node bot-supervisor.mjs --mode=gateway --action=restart",
+    "stop:gateway": "node bot-supervisor.mjs --action=stop",
     "status": "node bot-supervisor.mjs --action=status",
     "adapter": "node integration-adapter.mjs",
-    "config:validate": "node config-manager.mjs validate",
-    "config:apply": "node config-manager.mjs apply --source=manual",
     "check": "node tools/check.mjs",
     "test": "node tools/run-tests.mjs",
-    "test:pipeline": "node test-pipeline.mjs",
     "test:adapter": "node test-adapter-hardened.mjs"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
-    "zod": "^4.4.3",
     "dotenv": "^17.2.1"
   }
 }

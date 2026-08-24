@@ -10,18 +10,11 @@
 bot-state.json
 health-state.json
 
-# ---- Logs & event dumps ----
+# ---- Logs ----
 *.log
 *.log.*
 logs/
-failed-events.jsonl
 adapter-seen.jsonl
-config-lifecycle.log
-
-# ---- Local config with real IDs (use control-plane.example.json) ----
-control-plane.json
-control-plane.staged.json
-control-plane.json.bak.*
 
 # ---- Atomic write temp files ----
 *.tmp.*

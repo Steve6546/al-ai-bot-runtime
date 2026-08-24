@@ -3,6 +3,119 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.0.0] — 2026-08-24
+
+**Breaking release** — scope change to a single-purpose runtime. The logging
+channels, autorole and control-plane systems were removed entirely; the
+runtime is now an always-online Discord gateway presence with health telemetry
+and a hardened local adapter. **`.env` needs only `DISCORD_TOKEN`** — no
+guild/channel/role/user IDs anywhere.
+
+### Removed
+- **Logging system**: event pipeline (`event-pipeline.mjs`) with its five
+  queues, all six log-channel targets (JOIN_LEAVE / VOICE_LOG / MOD_LOG /
+  MESSAGE / MEMBER / SERVER), and every gateway listener that fed them.
+- **Autorole system**: role auto-assignment, `memberRoleName`.
+- **Control plane** (`control-plane.json` + `config-manager.mjs` +
+  `lib/config.mjs`): schema, staged/diff/apply/rollback lifecycle,
+  `ownerId`, `controlPlaneAllowedRoles`, `requireAuditForModLog`.
+- **Adapter config actions**: `suggestConfig`, `applyConfig`,
+  `listChannels` (and their schemas/key-blocklists). Allowlist is now
+  `getStatus, diagnose, readLogs`.
+- **Dependency**: `zod` (only used by the removed control-plane schema).
+  Remaining deps: `discord.js`, `dotenv`.
+- Gateway now declares **zero intents** and zero listeners (nothing
+  privileged, minimal bandwidth); the message-cache sweeper knob went with it.
+- Tests for removed systems: `test-pipeline.mjs`, `test-config.mjs`,
+  `test-adapter-validation.mjs`; pipeline cases in
+  `test-stability-fixes.mjs`.
+
+### Changed
+- `autorole-logger.mjs` → **`gateway.mjs`** (name matches what it now is).
+  Supervisor mode `gateway` added; legacy `--mode=logger` still works and
+  pre-v2 `.bot.lock` files still verify against their original script
+  (fail-safe upgrade path).
+- **getStatus rewritten**: reads local atomic files only (`bot-state.json`,
+  `health-state.json`, `.bot.lock`) — no subprocess spawn per request, no
+  stale Discord data; websocket state + snapshot age included.
+- **Rate limit moved after authentication**: failed auths consume their own
+  brute-force bucket; unauthenticated local processes can no longer exhaust
+  the authenticated request budget.
+- Temp log dir `%TEMP%\opencode\` → `%TEMP%\al-ai-bot-runtime\`
+  (`logger-out.log` → `gateway-out.log`); Linux/Pterodactyl compatible.
+- Partial member/author guards became moot: there are no event listeners left
+  to receive partial entities.
+- `health-state.json` no longer references control-plane/config-lifecycle.
+
+### Fixed
+- **Linux/Pterodactyl stale-lock handling**: `gateway.mjs` imported
+  `verifyProcess` directly from the Windows-only layer
+  (`process-verification.mjs`, PowerShell/CIM) — on Linux a crashed run's
+  `.bot.lock` could never be verified dead and the gateway refused to start
+  (exit 4). It now goes through the cross-platform dispatcher in
+  `lib/platform.mjs` (`/proc` + signal probes on POSIX).
+- **Clean exit on login failure**: a bad `DISCORD_TOKEN` raced the closing
+  websocket handle inside a bare `process.exit()` and crashed with a libuv
+  assertion on Windows (exit code -1073740791). The client is now destroyed
+  and libuv given 200 ms to settle before exiting with code 1.
+
+## [1.0.3] — 2026-08-24
+
+P0 correctness fixes from the second full audit. No wire-format, lock-protocol
+or schema changes; out-of-the-box timings are byte-for-byte identical to 1.0.2.
+
+### Fixed
+- **Wrongful config rollback on health check** (`config-manager.mjs`): the
+  gateway liveness probe used a raw `process.kill(pid, 0)` whose catch-all
+  treated `EPERM` as "not alive" — but per Node's documented signal-0 contract,
+  EPERM means the process EXISTS (restricted/other-owner). A healthy gateway
+  could therefore fail the post-apply health check and trigger a rollback.
+  Now uses the shared `verifyProcess` platform layer (EPERM-aware, with
+  cmdline/PID-reuse matching); `unknown` counts as unhealthy and follows the
+  existing rollback path.
+- **Moderation queue had no real cap**: above `max*1.5` the pipeline only
+  logged a warning while continuing to enqueue, so sustained floods grew
+  memory without bound. There is now an actual hard cap: at `max*1.5` the
+  event is persisted to `failed-events.jsonl` (already written before the cap
+  check) and NOT queued — memory stays bounded, nothing is lost. Regression:
+  `test-stability-fixes.mjs` T13.
+- **Graceful shutdown dropped queued events**: SIGTERM/SIGINT destroyed the
+  client and exited without draining queues or the pending moderation batch,
+  violating "moderation is never dropped" during shutdown. New
+  `EventPipeline.persistAllPending(reason)` drains every queue plus
+  `pendingMod` into `failed-events.jsonl` (sanitized primitives) BEFORE the
+  client is destroyed. Regression: T14.
+- **Broken join/leave channel no longer punished the moderation path**
+  (`event-pipeline.mjs`): the plain-leave embed (non-kick outcome of
+  `leaveOrKick`) is informational and targets JOIN_LEAVE, yet its failures
+  were recorded on the MOD_LOG circuit and burned moderation retries on audit
+  re-lookups. Failures now land on the JOIN_LEAVE circuit itself and the
+  embed is dropped under pressure (same policy as voice/message).
+  Regression: T15.
+
+### Changed
+- **control-plane timing knobs are now actually wired** (`event-pipeline.mjs`):
+  `debounceMs` was bypassed by hardcoded literals at all four call sites
+  (member/roleUpdate/voice 2500, message 5000) and `suppressMs` had no
+  consumer at all. Member/roleUpdate/voice debounce now use `debounceMs`,
+  message dedupe uses `debounceMs * 2`, and ban/mute suppression uses
+  `max(suppressMs, AUDIT_WINDOW_MS)`. With the shipped defaults the effective
+  values are identical to 1.0.2 (2500 / 2500 / 2500 / 5000 / 12000ms) — only
+  custom-configured values change behaviour, as they always should have.
+- New exported constant `AUDIT_WINDOW_MS` (12000ms): single source shared by
+  the audit-log freshness check in `autorole-logger.mjs` and the suppression
+  floor in `event-pipeline.mjs`.
+- **health-state reflects the real websocket** (`health-state.mjs`):
+  `gateway.state` was `'connected'` whenever `.bot.lock` existed — even while
+  discord.js was reconnecting. The gateway now feeds `client.ws.status` into
+  the snapshot: `connected` only when the websocket is truly Ready, otherwise
+  `connecting / reconnecting / idle / nearly / disconnected`; `lock-only`,
+  `starting`, `stopped` are kept for snapshots without websocket info.
+  Regression: T16.
+- **Perf**: supervisor `waitForReady` reads only the last 8 KB of the gateway
+  log per 500 ms poll instead of the whole (up to 10 MB) file each tick.
+- Dead import removed (`renameSync` in `autorole-logger.mjs`).
+
 ## [1.0.2] — 2026-08-23
 
 Cross-platform support on top of v1.0.1. Single Gateway Runtime, atomic lock,

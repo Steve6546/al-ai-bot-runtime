@@ -95,7 +95,7 @@ check('T-P1 no/invalid pid -> dead on both implementations',
   // ts-node/TypeScript, and that prose must not trip the code check
   const code = readFileSync(name, 'utf8').replace(/^\s*\/\/.*$/gm, '');
   check('T-P12 entrypoint is plain Node (no ts-node/TypeScript)', !/ts-node|typescript|\.ts['"]/.test(code));
-  check('T-P13 entrypoint starts the gateway (autorole-logger import)', code.includes('autorole-logger'));
+  check('T-P13 entrypoint starts the gateway runtime', code.includes('gateway.mjs'));
 }
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES PRESENT'} — pass=${pass} fail=${fail}`);

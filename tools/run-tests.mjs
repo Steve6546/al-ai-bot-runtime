@@ -3,7 +3,7 @@
 // if one is already listening) for the HTTP suites, and the rate-limit burst
 // test runs LAST because it saturates the 60 req/min per-IP limiter.
 // If .env does not exist, a local one is created with a generated
-// ADAPTER_TOKEN and placeholder Discord values — never a real token.
+// ADAPTER_TOKEN and a placeholder DISCORD_TOKEN — never a real token.
 import { spawn, execSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -29,37 +29,33 @@ async function adapterUp() {
 function ensureEnvFile() {
   const envPath = join(root, '.env');
   if (existsSync(envPath)) return;
-  console.log('[runner] .env not found — creating one with a generated ADAPTER_TOKEN and placeholder Discord values');
+  console.log('[runner] .env not found — creating one with a generated ADAPTER_TOKEN and a placeholder DISCORD_TOKEN');
   writeFileSync(envPath,
     `DISCORD_TOKEN=placeholder_not_a_real_token\n` +
-    `OMNICORD_GUILD=123456789012345678\n` +
     `ADAPTER_TOKEN=${randomBytes(32).toString('hex')}\n`);
 }
 
 async function main() {
   run('node tools/check.mjs');
-  run('node test-config.mjs');
   run('node test-platform.mjs');
 
-  // Entrypoint fail-fast: with no control-plane.json, `node index.js` must
-  // exit non-zero with a clear FATAL message BEFORE any Discord traffic.
-  // Skipped when a real config exists (the gateway would then start for real).
-  if (!existsSync(join(root, 'control-plane.json'))) {
-    console.log('\n>>> node index.js (expect fast config failure)');
+  // Entrypoint fail-fast: `node index.js` must exit non-zero with a clear
+  // FATAL message BEFORE any Discord traffic when no token is configured.
+  // DISCORD_TOKEN='' overrides any existing .env (dotenv never overrides
+  // real env vars), so this is deterministic and offline.
+  {
+    console.log('\n>>> node index.js (expect fast token failure)');
     let out = '';
     try {
-      out = execSync('node index.js', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
-      throw new Error('entrypoint exited 0 without control-plane.json — should have failed fast');
+      out = execSync('node index.js', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, env: { ...process.env, DISCORD_TOKEN: '' } });
+      throw new Error('entrypoint exited 0 without DISCORD_TOKEN — should have failed fast');
     } catch (e) {
       out = String(e.stdout || '') + String(e.stderr || '');
       if (!/FATAL/.test(out)) throw new Error(`entrypoint did not fail with a clear message: ${out.slice(0, 200)}`);
-      console.log('PASS entrypoint fails fast with clear config error (no Discord contact)');
+      console.log('PASS entrypoint fails fast with clear token error (no Discord contact)');
     }
-  } else {
-    console.log('\n[runner] skip entrypoint fail-fast (control-plane.json present)');
   }
 
-  run('node test-pipeline.mjs');
   ensureEnvFile();
 
   // Reuse an already-listening adapter; otherwise start a child just for the
@@ -85,7 +81,6 @@ async function main() {
   try {
     // light HTTP suites first (rate-limit budget), burst test last
     run('node test-stability-fixes.mjs');
-    run('node test-adapter-validation.mjs');
     run('node test-adapter-hardened.mjs');
   } finally {
     if (child?.pid) {
