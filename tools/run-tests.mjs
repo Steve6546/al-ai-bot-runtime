@@ -1,4 +1,4 @@
-// tools/run-tests.mjs � one-command test runner (npm test). Hybrid v2+v1.
+// tools/run-tests.mjs - one-command test runner (npm test). Hybrid v2+v1.
 // Order matters: offline suites first, then adapter is started for HTTP suites.
 // If .env does not exist, a local one is created with generated ADAPTER_TOKEN.
 import { spawn, execSync } from 'node:child_process';
@@ -26,7 +26,7 @@ async function adapterUp() {
 function ensureEnvFile() {
   const envPath = join(root, '.env');
   if (existsSync(envPath)) return;
-  console.log('[runner] .env not found � creating one with generated ADAPTER_TOKEN and placeholder Discord values');
+  console.log('[runner] .env not found - creating one with generated ADAPTER_TOKEN and placeholder Discord values');
   writeFileSync(envPath,
     'DISCORD_TOKEN=placeholder_not_a_real_token\n' +
     'OMNICORD_GUILD=123456789012345678\n' +
@@ -54,7 +54,7 @@ async function main() {
       let out = '';
       try {
         out = execSync('node index.js', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
-        throw new Error('entrypoint exited 0 without DISCORD_TOKEN � should have failed fast');
+        throw new Error('entrypoint exited 0 without DISCORD_TOKEN - should have failed fast');
       } catch (e) {
         out = String(e.stdout || '') + String(e.stderr || '');
         if (!/FATAL/.test(out) || !/DISCORD_TOKEN/.test(out)) throw new Error('entrypoint did not fail with DISCORD_TOKEN FATAL: ' + out.slice(0, 300));

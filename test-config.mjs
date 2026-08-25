@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { controlPlaneSchema, loadControlPlane, resolveRuntimeConfig, DEFAULT_CONTROL_PLANE_PATH } from './lib/config.mjs';
-import { requireEnv, readEnv, isSnowflake } from './lib/env.mjs';
+import { requireEnv, isSnowflake } from './lib/env.mjs';
 import { projectDir } from './lib/paths.mjs';
 
 let pass = 0, fail = 0;

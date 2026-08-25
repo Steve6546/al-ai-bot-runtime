@@ -1,5 +1,6 @@
-# Node 20 LTS (also runs on 22). Plain JavaScript — no build step, no ts-node.
-FROM node:20-slim
+# Node 24 LTS (active LTS; Node 20 reached EOL in April 2026).
+# Plain JavaScript — no build step, no ts-node.
+FROM node:24-slim
 
 WORKDIR /app
 

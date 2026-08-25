@@ -4,17 +4,17 @@
 // (6 channels, 5 queues, autorole, audit) when both are present. Unified
 // Discord service via lib/discord.mjs. Single gateway, single lock, single
 // pipeline — no duplication with MCP.
-import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync, closeSync, fsyncSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync, closeSync, fsyncSync, watch } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client, GatewayIntentBits, Partials, Events, AuditLogEvent } from 'discord.js';
 import { EventPipeline } from './event-pipeline.mjs';
 import { startRotationWatcher } from './log-rotation.mjs';
-import { startHealthWatcher, setLastEvent } from './health-state.mjs';
+import { startHealthWatcher, setLastEvent, setLastError, updateHealthState } from './health-state.mjs';
 import { verifyProcess } from './lib/platform.mjs';
 import { readEnv, ensureEnvLoaded, readEnvInt } from './lib/env.mjs';
-import { tryResolveRuntimeConfig } from './lib/config.mjs';
-import { gatewayLogPath } from './lib/paths.mjs';
+import { tryResolveRuntimeConfig, controlPlaneSchema, DEFAULT_CONTROL_PLANE_PATH } from './lib/config.mjs';
+import { gatewayLogPath, projectDir } from './lib/paths.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 import { sendViaClientOrRest } from './lib/discord.mjs';
 import { randomUUID } from 'node:crypto';
@@ -23,7 +23,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PID_FILE = join(__dirname, '.bot.pid');
 const LOCK_FILE = join(__dirname, '.bot.lock');
 
-// Fail fast on missing token � before any lock is created.
+// Fail fast on missing token - before any lock is created.
 ensureEnvLoaded();
 const TOKEN = readEnv('DISCORD_TOKEN');
 if (!TOKEN) {
@@ -41,7 +41,7 @@ try {
   if (cfg) {
     FULL_MODE = true;
     RUNTIME = cfg;
-    console.log(new Date().toISOString(), 'LOG: full logging mode enabled � guild', RUNTIME.guildId, 'channels', Object.keys(RUNTIME.channels).join(','));
+    console.log(new Date().toISOString(), 'LOG: full logging mode enabled - guild', RUNTIME.guildId, 'channels', Object.keys(RUNTIME.channels).join(','));
   } else {
     console.log(new Date().toISOString(), 'LOG: minimal presence mode — no control-plane.json / GUILD_ID, running with zero intents');
   }
@@ -79,7 +79,7 @@ const LOCK_DATA = {
   processCommand: `node ${process.argv[1] || 'gateway.mjs'}`,
   schemaVersion: 1
 };
-// Create gateway lock atomically � persists for entire gateway lifetime (fail-safe: unknown ? dead)
+// Create gateway lock atomically - persists for entire gateway lifetime (fail-safe: unknown ? dead)
 try {
   if (existsSync(LOCK_FILE)) {
     try {
@@ -91,7 +91,7 @@ try {
         console.error(new Date().toISOString(), `FATAL: .bot.lock already held by ${existing.pid} via ${v.method}`);
         process.exit(2);
       } else if (v.state === 'unknown') {
-        console.error(new Date().toISOString(), `FATAL: .bot.lock state unknown for pid ${existing.pid} (${v.method}: ${v.reason.slice(0,80)}) � refusing to overwrite (fail-safe)`);
+        console.error(new Date().toISOString(), `FATAL: .bot.lock state unknown for pid ${existing.pid} (${v.method}: ${v.reason.slice(0,80)}) - refusing to overwrite (fail-safe)`);
         process.exit(4);
       } else {
         console.log(new Date().toISOString(), `LOG: removing stale .bot.lock ${existing.pid} (${v.method}: ${v.reason})`);
@@ -114,7 +114,7 @@ try {
   atomicWriteJson(PID_FILE, LOCK_DATA.pid);
 } catch (e) { console.error('lock create failed', e.message); process.exit(1); }
 
-// rotation watcher � gateway-owned logs only (plus failed-events in full mode)
+// rotation watcher - gateway-owned logs only (plus failed-events in full mode)
 try {
   const logs = [join(__dirname, 'supervisor.log'), gatewayLogPath()];
   if (FULL_MODE) logs.push(join(__dirname, 'failed-events.jsonl'), join(__dirname, 'config-lifecycle.log'));
@@ -134,7 +134,7 @@ function cleanupLock() {
 }
 process.on('exit', cleanupLock);
 
-// Client creation � conditional intents based on mode (no listeners in minimal mode => zero intents)
+// Client creation - conditional intents based on mode (no listeners in minimal mode => zero intents)
 let client;
 let pipeline = null;
 if (FULL_MODE) {
@@ -159,7 +159,7 @@ if (FULL_MODE) {
   client = new Client({ intents: [] });
 }
 
-// Graceful shutdown handlers � setup after client is defined so they can persist pipeline & destroy client
+// Graceful shutdown handlers - setup after client is defined so they can persist pipeline & destroy client
 process.on('SIGINT', async () => {
   console.log(new Date().toISOString(), 'LOG: SIGINT received');
   try {
@@ -172,7 +172,7 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 process.on('SIGTERM', async () => {
-  console.log(new Date().toISOString(), 'LOG: SIGTERM received � graceful destroy');
+  console.log(new Date().toISOString(), 'LOG: SIGTERM received - graceful destroy');
   try {
     if (pipeline && typeof pipeline.persistAllPending === 'function') {
       try { pipeline.persistAllPending('SIGTERM'); } catch {}
@@ -200,7 +200,10 @@ if (FULL_MODE) {
 
   async function getAudit(guild, type, targetId) {
     try {
-      await sleep(900);
+      // Short wait only: handlers call prefetchAudit() at event time so the
+      // fetch is usually already in flight while the pipeline reaches this
+      // event (was a blocking 900 ms sleep inside the serial processing loop).
+      await sleep(250);
       const key = `${guild.id}:${type}`;
       let entriesPromise = auditInflight.get(key);
       if (!entriesPromise) {
@@ -208,15 +211,7 @@ if (FULL_MODE) {
         if (recent && Date.now() - recent.ts < AUDIT_SHARE_MS) {
           entriesPromise = Promise.resolve(recent.entries);
         } else {
-          entriesPromise = guild.fetchAuditLogs({ type, limit: 5 })
-            .then(logs => {
-              const entries = logs.entries.toArray ? logs.entries.toArray() : Array.from(logs.entries.values?.() || logs.entries);
-              if (auditRecent.size > AUDIT_CACHE_MAX) auditRecent.clear();
-              auditRecent.set(key, { ts: Date.now(), entries });
-              return entries;
-            })
-            .catch(() => null);
-          auditInflight.set(key, entriesPromise);
+          entriesPromise = startAuditFetch(guild, key, type);
         }
       }
       const entries = await entriesPromise;
@@ -226,6 +221,31 @@ if (FULL_MODE) {
       if (e) return { executor: e.executor, reason: e.reason || null };
     } catch {}
     return null;
+  }
+
+  function startAuditFetch(guild, key, type) {
+    const p = guild.fetchAuditLogs({ type, limit: 5 })
+      .then(logs => {
+        const entries = logs.entries.toArray ? logs.entries.toArray() : Array.from(logs.entries.values?.() || logs.entries);
+        if (auditRecent.size > AUDIT_CACHE_MAX) auditRecent.clear();
+        auditRecent.set(key, { ts: Date.now(), entries });
+        return entries;
+      })
+      .catch(() => null);
+    auditInflight.set(key, p);
+    return p;
+  }
+
+  // Fire-and-forget prefetch so audit data is ready when the queued event is
+  // processed — removes the audit round-trip from the serial send path.
+  function prefetchAudit(guild, type) {
+    try {
+      const key = `${guild.id}:${type}`;
+      if (auditInflight.has(key)) return;
+      const recent = auditRecent.get(key);
+      if (recent && Date.now() - recent.ts < AUDIT_SHARE_MS) return;
+      startAuditFetch(guild, key, type);
+    } catch {}
   }
 
   async function sendEmbed(chId, embed) {
@@ -242,13 +262,54 @@ if (FULL_MODE) {
     try { setLastEvent(ev.type || cat); } catch {}
     return _origEnqueue(cat, ev);
   };
+  const _origEnqueueJoin = pipeline.enqueueJoin.bind(pipeline);
+  pipeline.enqueueJoin = ev => {
+    try { setLastEvent('join'); } catch {}
+    return _origEnqueueJoin(ev);
+  };
+
+  // Hot-reload: control-plane.json is written atomically (tmp + rename) by
+  // config-manager/adapter, so the watcher fires on the rename. Invalid or
+  // unchanged files are ignored — the running config is never left half-applied.
+  // GUILD_ID and the 6 channel *names* are fixed at boot; changing guild still
+  // requires a supervisor restart.
+  let lastCfgJson = JSON.stringify(RUNTIME.controlPlane);
+  let reloadTimer = null;
+  try {
+    // Watch the DIRECTORY, not the file: atomic writes replace the file via
+    // rename, which orphans an inode-based file watch (silently dead on Linux).
+    watch(projectDir, (event, filename) => {
+      if (filename && filename !== 'control-plane.json') return;
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        try {
+          const parsed = controlPlaneSchema.safeParse(JSON.parse(readFileSync(DEFAULT_CONTROL_PLANE_PATH, 'utf8')));
+          if (!parsed.success) {
+            log('hot-reload rejected invalid control-plane.json:', parsed.error.issues.map(i => i.message).join('; ').slice(0, 200));
+            return;
+          }
+          const nextJson = JSON.stringify(parsed.data);
+          if (nextJson === lastCfgJson) return;
+          lastCfgJson = nextJson;
+          CH = parsed.data.logging.channels;
+          timing = { debounceMs: parsed.data.logging.debounceMs, batchMs: parsed.data.logging.batchMs, suppressMs: parsed.data.logging.suppressMs };
+          autoroleEnabled = parsed.data.autorole.enabled;
+          MEMBER_ROLE = parsed.data.autorole.memberRoleName;
+          pipeline.CH = CH;
+          pipeline.timing = timing;
+          log('hot-reload applied new control-plane.json (schemaVersion', String(parsed.data.schemaVersion) + ')');
+        } catch (e) { err('hot-reload failed:', e.message); }
+      }, 600);
+    });
+    log('control-plane hot-reload watcher active');
+  } catch (e) { err('hot-reload watcher unavailable:', e.message); }
 
   client.once(Events.ClientReady, c => {
-    log(`READY as ${c.user.tag} � guild ${GUILD} � 6 log targets from control-plane.json (full mode)`);
-    log(`pipeline ready � 5 queues (moderation > member > server > voice > message), timing ${JSON.stringify(timing)}`);
+    log(`READY as ${c.user.tag} - guild ${GUILD} - 6 log targets from control-plane.json (full mode)`);
+    log(`pipeline ready - 5 queues (moderation > member > server > voice > message), timing ${JSON.stringify(timing)}`);
   });
 
-  // Join: autorole + join log
+  // Join: autorole + batched join log (raid-safe via pipeline.enqueueJoin)
   client.on(Events.GuildMemberAdd, async m => {
     if (autoroleEnabled) {
       try {
@@ -256,7 +317,7 @@ if (FULL_MODE) {
         if (role) { await m.roles.add(role); log('auto-role', m.user.tag); }
       } catch (e) { err('auto-role', e.message); }
     }
-    pipeline.enqueue('member', {
+    pipeline.enqueueJoin({
       type: 'join',
       targetId: m.id, targetTag: m.user.tag, thumb: m.user.displayAvatarURL(),
       guildId: m.guild.id,
@@ -269,9 +330,9 @@ if (FULL_MODE) {
     const thumb = n.member?.user?.displayAvatarURL() || o.member?.user?.displayAvatarURL() || null;
     const guildId = n.guild?.id || o.guild?.id || GUILD;
     let title, desc, color, oldCh, newCh;
-    if (!o.channelId && n.channelId) { title = '🎩 ???? ????'; desc = `<@${id}> ??? **${n.channel.name}**`; color = 0x5865f2; oldCh = null; newCh = n.channelId; }
-    else if (o.channelId && !n.channelId) { title = '🔇 ???? ????'; desc = `<@${id}> ??? ?? **${o.channel.name}**`; color = 0x99aab5; oldCh = o.channelId; newCh = null; }
-    else if (o.channelId !== n.channelId) { title = '🔁 ?????? ????'; desc = `<@${id}> ?????`; color = 0xfee75c; oldCh = o.channelId; newCh = n.channelId; }
+    if (!o.channelId && n.channelId) { title = '🎩 دخول الروم'; desc = `<@${id}> دخل **${n.channel.name}**`; color = 0x5865f2; oldCh = null; newCh = n.channelId; }
+    else if (o.channelId && !n.channelId) { title = '🔇 خروج من الروم'; desc = `<@${id}> خرج من **${o.channel.name}**`; color = 0x99aab5; oldCh = o.channelId; newCh = null; }
+    else if (o.channelId !== n.channelId) { title = '🔁 تنقّل بين الرومات'; desc = `<@${id}> تنقّل`; color = 0xfee75c; oldCh = o.channelId; newCh = n.channelId; }
     else return;
     pipeline.enqueue('voice', {
       type: 'voice', targetId: id, targetTag: tag, thumb, guildId,
@@ -308,6 +369,7 @@ if (FULL_MODE) {
     const newTO = newM.communicationDisabledUntil?.getTime() || 0;
     if (oldTO !== newTO) {
       const isMute = newTO > Date.now();
+      prefetchAudit(newM.guild, AuditLogEvent.MemberUpdate);
       pipeline.enqueue('moderation', {
         type: isMute ? 'mute' : 'unmute',
         targetId: newM.id, targetTag: newM.user.tag, thumb: newM.user.displayAvatarURL(),
@@ -338,12 +400,14 @@ if (FULL_MODE) {
   });
 
   client.on(Events.GuildBanAdd, async ban => {
+    prefetchAudit(ban.guild, AuditLogEvent.MemberBanAdd);
     pipeline.enqueue('moderation', {
       type: 'ban', targetId: ban.user.id, targetTag: ban.user.tag, thumb: ban.user.displayAvatarURL(),
       guildId: ban.guild.id
     });
   });
   client.on(Events.GuildBanRemove, async ban => {
+    prefetchAudit(ban.guild, AuditLogEvent.MemberBanRemove);
     pipeline.enqueue('moderation', {
       type: 'unban', targetId: ban.user.id, targetTag: ban.user.tag, thumb: ban.user.displayAvatarURL(),
       guildId: ban.guild.id
@@ -351,6 +415,7 @@ if (FULL_MODE) {
   });
 
   client.on(Events.GuildMemberRemove, async m => {
+    prefetchAudit(m.guild, AuditLogEvent.MemberKick);
     pipeline.enqueue('moderation', {
       type: 'leaveOrKick', targetId: m.id, targetTag: m.user.tag, thumb: m.user.displayAvatarURL(),
       guildId: m.guild.id, member: m
@@ -382,12 +447,24 @@ if (FULL_MODE) {
 } else {
   // Minimal mode: health + ready log only
   client.once(Events.ClientReady, c => {
-    log(`READY as ${c.user.tag} � single gateway runtime online (minimal mode, zero intents)`);
+    log(`READY as ${c.user.tag} - single gateway runtime online (minimal mode, zero intents)`);
   });
   try { startHealthWatcher(null, HEALTH_INTERVAL_MS, () => client.ws?.status); } catch {}
 }
 
-process.on('unhandledRejection', e => err('UNHANDLED', e?.message || e));
+process.on('unhandledRejection', e => {
+  err('UNHANDLED', e?.message || e);
+  try { setLastError('gateway', 'unhandledRejection'); } catch {}
+});
+// Crash path: persist every queued event + record the error in health-state
+// before exiting, so nothing buffered is lost and diagnostics stay accurate.
+process.on('uncaughtException', e => {
+  err('UNCAUGHT', e?.stack ? String(e.stack).split('\n').slice(0, 4).join(' | ') : String(e));
+  try { setLastError('gateway', 'uncaughtException'); } catch {}
+  try { updateHealthState({ wsStatus: () => client?.ws?.status }); } catch {}
+  try { pipeline?.persistAllPending?.('uncaughtException'); } catch {}
+  process.exit(1);
+});
 client.login(TOKEN).then(() => log('logging in...')).catch(async e => {
   err('LOGIN FAIL', e.message);
   try { await client.destroy(); } catch {}

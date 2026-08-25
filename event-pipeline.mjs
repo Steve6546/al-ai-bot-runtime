@@ -16,8 +16,44 @@ const DEFAULT_MAX = { moderation: 200, member: 120, server: 100, voice: 60, mess
 const DEFAULT_TIMING = { debounceMs: 2500, batchMs: 3500, suppressMs: 10000 };
 export const AUDIT_WINDOW_MS = 12000;
 const MOD_FLUSH_RETRIES = 2;
+const JOIN_BATCH_MAX = 8;
+// Rolling window of enqueue-to-send latencies per category used for p95.
+const LATENCY_WINDOW = 200;
+
+/**
+ * @typedef {Object} PipelineEvent
+ * @property {string} type                       Event discriminator (join, ban, voice, edit, ...).
+ * @property {string} [targetId]                 Discord user/member snowflake.
+ * @property {string} [targetTag]                username#tag or display name (log only).
+ * @property {string} [guildId]                  Guild the event belongs to.
+ * @property {string|null} [thumb]               Avatar URL for embed thumbnails.
+ * @property {number} [_ts]                      Enqueue timestamp (set by pipeline).
+ * @property {number} [_enqueuedAt]              Alias timestamp for diagnostics.
+ * @property {boolean} [_skipped]                Set by handlers when debounce/suppress drops the event.
+ * @property {number} [_retries]                 Moderation retry counter.
+ */
+
+/**
+ * @typedef {Object} EventPipelineDeps
+ * @property {import('discord.js').Client} client
+ * @property {{JOIN_LEAVE:string, VOICE_LOG:string, MOD_LOG:string, MESSAGE:string, MEMBER:string, SERVER:string}} channels
+ * @property {(guild: any, type: number, targetId: string) => Promise<{executor: any, reason: string|null}|null>} getAudit
+ * @property {(channelId: string, embed: import('discord.js').EmbedBuilder) => Promise<void>} sendEmbed
+ * @property {...any} log
+ * @property {...any} err
+ * @property {Partial<Record<'moderation'|'member'|'server'|'voice'|'message', number>>} [maxLengths]
+ * @property {{debounceMs?:number, batchMs?:number, suppressMs?:number}} [timing]
+ */
+
+// Nearest-rank percentile over a numeric array (0 for empty windows).
+function percentile(arr, p) {
+  if (!arr || !arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
 
 export class EventPipeline {
+  /** @param {EventPipelineDeps} deps */
   constructor({ client, channels, getAudit, sendEmbed, log, err, maxLengths = {}, timing = {} }) {
     this.client = client;
     this.CH = channels;
@@ -44,16 +80,23 @@ export class EventPipeline {
     }, 30000);
     this.pendingMod = [];
     this.modTimer = null;
+    // join batching: joins are aggregated in a time window (like moderation)
+    // so a member raid produces ONE aggregated embed instead of flooding JOIN_LEAVE
+    this.pendingJoins = [];
+    this.joinTimer = null;
     // metrics
     this.metrics = {
       queueDepth: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
       oldestAgeMs: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
+      queueWaitP95Ms: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
       sent: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
+      skipped: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
       failed: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
       retried: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
       dropped: { moderation: 0, member: 0, server: 0, voice: 0, message: 0 },
       circuitState: {},
     };
+    this.latencies = { moderation: [], member: [], server: [], voice: [], message: [] };
     this._updateMetrics();
     // fallback polling (safety) + event-driven via enqueue
     setInterval(() => { if (!this.processing && this.hasPending()) this.schedule(); }, 1000);
@@ -90,8 +133,10 @@ export class EventPipeline {
       const chId = this.getChannelForCategory(cat, this.queues[cat][0]);
       const circ = chId ? this.getCircuit(chId) : null;
       this.metrics.circuitState[cat] = circ ? (Date.now() < circ.openUntil ? `open:${Math.round((circ.openUntil-Date.now())/1000)}s` : 'closed') : 'closed';
+      this.metrics.queueWaitP95Ms[cat] = percentile(this.latencies[cat], 0.95);
     }
   }
+  /** @returns {{queueDepth:Object, oldestAgeMs:Object, queueWaitP95Ms:Object, sent:Object, skipped:Object, failed:Object, retried:Object, dropped:Object, circuitState:Object}} metrics snapshot */
   getMetrics() {
     this._updateMetrics();
     return JSON.parse(JSON.stringify(this.metrics));
@@ -132,7 +177,14 @@ export class EventPipeline {
       this.metrics.failed.moderation++;
       total++;
     }
+    while (this.pendingJoins.length) {
+      const j = this.pendingJoins.shift();
+      this.writeFailed('member', j, `persistAllPending:${reason}:pendingJoins`);
+      this.metrics.failed.member++;
+      total++;
+    }
     if (this.modTimer) { clearTimeout(this.modTimer); this.modTimer = null; }
+    if (this.joinTimer) { clearTimeout(this.joinTimer); this.joinTimer = null; }
     this._updateMetrics();
     this.log(`persistAllPending drained ${total} events reason=${reason}`);
     return total;
@@ -145,6 +197,11 @@ export class EventPipeline {
     } catch {}
   }
 
+  /**
+   * Queue an event into its category queue (bounded, weighted scheduling).
+   * @param {'moderation'|'member'|'server'|'voice'|'message'} category
+   * @param {PipelineEvent} event
+   */
   enqueue(category, event) {
     if (!this.queues[category]) category = 'message';
     event._ts = event._ts || Date.now();
@@ -165,7 +222,7 @@ export class EventPipeline {
         this.log(`moderation overflow — persisted to file, queue size ${this.queues[category].length}/${max}`);
       } else if (category === 'message' || category === 'voice') {
         // drop oldest, count dropped (merge/drop under pressure)
-        const dropped = this.queues[category].shift();
+        this.queues[category].shift();
         this.metrics.dropped[category]++;
         this.log(`dropped ${category} oldest event due to overflow (max ${max})`);
       } else {
@@ -211,7 +268,10 @@ export class EventPipeline {
             this._updateMetrics();
             try {
               await this.handleByCategory(cat, ev);
-              this.metrics.sent[cat]++;
+              // Handlers flag events they intentionally drop (debounce/suppress)
+              // so "sent" stays an accurate measure of real Discord sends.
+              if (ev._skipped) this.metrics.skipped[cat]++;
+              else { this.metrics.sent[cat]++; this._recordLatency(cat, ev); }
               this.recordCircuit(chId, true);
             } catch (e) {
               this.err(`pipeline ${cat}`, e.message);
@@ -247,6 +307,12 @@ export class EventPipeline {
     }
   }
 
+  _recordLatency(cat, ev) {
+    const arr = this.latencies[cat];
+    arr.push(Date.now() - (ev._ts || Date.now()));
+    if (arr.length > LATENCY_WINDOW) arr.shift();
+  }
+
   getChannelForCategory(cat, ev) {
     if (!ev) return null;
     if (cat === 'moderation') return this.CH.MOD_LOG;
@@ -274,7 +340,7 @@ export class EventPipeline {
     const guild = await this.client.guilds.fetch(ev.guildId).catch(()=>null);
     if (!guild) throw new Error('guild fetch failed');
     if (ev.type === 'leaveOrKick') {
-      if (this.isSuppressed(ev.targetId)) { this.log('leave suppressed (ban)', ev.targetTag); return; }
+      if (this.isSuppressed(ev.targetId)) { ev._skipped = true; this.log('leave suppressed (ban)', ev.targetTag); return; }
       const audit = await this.getAudit(guild, AuditLogEvent.MemberKick, ev.targetId);
       if (audit) {
         this.suppress(ev.targetId, Math.max(this.timing.suppressMs, AUDIT_WINDOW_MS));
@@ -310,6 +376,65 @@ export class EventPipeline {
     this.pendingMod.push(entry);
     entry._ts = Date.now();
     if (!this.modTimer) this.modTimer = setTimeout(() => this.flushMod(), this.timing.batchMs);
+  }
+  // ——— join batching (anti raid-flood) ———
+  /**
+   * Queue a join event into the batching window (flushed as one embed).
+   * @param {PipelineEvent} ev
+   */
+  enqueueJoin(ev) {
+    ev._ts = Date.now();
+    this.pendingJoins.push(ev);
+    if (this.pendingJoins.length >= JOIN_BATCH_MAX) {
+      this.flushJoins();
+      return;
+    }
+    if (!this.joinTimer) this.joinTimer = setTimeout(() => this.flushJoins(), this.timing.batchMs);
+  }
+  async flushJoins() {
+    const batch = [...this.pendingJoins]; this.pendingJoins = [];
+    if (this.joinTimer) { clearTimeout(this.joinTimer); this.joinTimer = null; }
+    if (!batch.length) return;
+    const chId = this.CH.JOIN_LEAVE;
+    if (this.isCircuitOpen(chId)) {
+      this.log('join flush deferred circuit open');
+      this.pendingJoins.unshift(...batch);
+      this.joinTimer = setTimeout(() => this.flushJoins(), this.timing.batchMs);
+      return;
+    }
+    try {
+      let em;
+      if (batch.length === 1) {
+        const ev = batch[0];
+        em = new EmbedBuilder().setColor(0x57f287).setTimestamp().setAuthor({ name: '📥 دخول عضو جديد' }).setThumbnail(ev.thumb || null)
+          .addFields(
+            { name: '👤 العضو', value: `<@${ev.targetId}> (\`${ev.targetTag}\` — \`${ev.targetId}\`)`, inline: false },
+            { name: '🕒 الوقت', value: `<t:${Math.floor(ev._ts/1000)}:R>`, inline: true }
+          );
+      } else {
+        em = new EmbedBuilder().setColor(0x57f287).setTimestamp().setAuthor({ name: `📥 دخول جماعي — ${batch.length} أعضاء` })
+          .setDescription(batch.slice(0, 20).map(e => `• <@${e.targetId}> (\`${e.targetTag}\`)`).join('\n').slice(0, 3500))
+          .addFields({ name: '🕒 بداية النافذة', value: `<t:${Math.floor(batch[0]._ts/1000)}:R>`, inline: true });
+      }
+      await this._sendEmbed(chId, em);
+      this.recordCircuit(chId, true);
+      this.metrics.sent.member += batch.length;
+      for (const b of batch) this._recordLatency('member', b);
+      this.log(`flushed join batch: ${batch.length}`);
+    } catch (e) {
+      this.err('flushJoins', e.message);
+      this.recordCircuit(chId, false);
+      const retries = batch[0]._retries || 0;
+      if (retries < MOD_FLUSH_RETRIES) {
+        for (const b of batch) b._retries = retries + 1;
+        this.metrics.retried.member += batch.length;
+        this.pendingJoins.unshift(...batch);
+        this.joinTimer = setTimeout(() => this.flushJoins(), 1500 * (retries + 1));
+      } else {
+        for (const b of batch) this.writeFailed('member', b, `join batch retries exhausted (${retries}): ${e.message}`);
+        this.metrics.failed.member += batch.length;
+      }
+    }
   }
   async flushMod() {
     const batch = [...this.pendingMod]; this.pendingMod = []; this.modTimer = null;
@@ -349,6 +474,7 @@ export class EventPipeline {
       this.log(`pipeline flushed mod batch: ${batch.length}`);
       this.recordCircuit(chId, true);
       this.metrics.sent.moderation += batch.length;
+      for (const b of batch) this._recordLatency('moderation', b);
     } catch (e) {
       this.err('flushMod', e.message);
       this.recordCircuit(chId, false);
@@ -390,8 +516,8 @@ export class EventPipeline {
       await this._sendEmbed(this.CH.JOIN_LEAVE, em);
       return;
     }
-    if (this.isSuppressed(ev.targetId)) { this.log('member suppressed', ev.targetTag); return; }
-    if (!this.shouldFire(`mupd-${ev.targetId}`, this.timing.debounceMs)) { this.log('member debounce', ev.targetTag); return; }
+    if (this.isSuppressed(ev.targetId)) { ev._skipped = true; this.log('member suppressed', ev.targetTag); return; }
+    if (!this.shouldFire(`mupd-${ev.targetId}`, this.timing.debounceMs)) { ev._skipped = true; this.log('member debounce', ev.targetTag); return; }
     if (ev.type === 'roleAdd' || ev.type === 'roleRemove') {
       const em = new EmbedBuilder().setColor(ev.color).setTimestamp().setThumbnail(ev.thumb || null).setAuthor({ name: ev.title })
         .addFields(
@@ -415,7 +541,7 @@ export class EventPipeline {
   // ——— server ———
   async handleServer(ev) {
     if (ev.role?.managed || ev.role?.tags?.botId) return;
-    if (ev.type === 'roleUpdate' && !this.shouldFire(`rupdate-${ev.role?.id || ev.newR?.id}`, this.timing.debounceMs)) return;
+    if (ev.type === 'roleUpdate' && !this.shouldFire(`rupdate-${ev.role?.id || ev.newR?.id}`, this.timing.debounceMs)) { ev._skipped = true; return; }
     let em;
     if (ev.type === 'roleCreate') {
       const audit = await this.getAudit(await this.client.guilds.fetch(ev.guildId), AuditLogEvent.RoleCreate, ev.role.id);
@@ -465,7 +591,7 @@ export class EventPipeline {
   // ——— voice ———
   async handleVoice(ev) {
     const key = `voice-${ev.targetId}-${ev.oldChannel||'null'}-${ev.newChannel||'null'}`;
-    if (!this.shouldFire(key, this.timing.debounceMs)) { this.log('voice debounce', ev.targetTag); return; }
+    if (!this.shouldFire(key, this.timing.debounceMs)) { ev._skipped = true; this.log('voice debounce', ev.targetTag); return; }
     const em = new EmbedBuilder().setColor(ev.color).setTimestamp().setAuthor({ name: ev.title }).setDescription(ev.desc);
     if (ev.thumb) em.setThumbnail(ev.thumb);
     if (ev.fields) { for (const f of ev.fields) em.addFields(f); }
@@ -479,7 +605,7 @@ export class EventPipeline {
   // ——— message ———
   async handleMessage(ev) {
     const key = ev.type === 'edit' ? `msgedit-${ev.id}` : `msgdel-${ev.id}`;
-    if (!this.shouldFire(key, this.timing.debounceMs * 2)) { this.log('message debounce', key); return; }
+    if (!this.shouldFire(key, this.timing.debounceMs * 2)) { ev._skipped = true; this.log('message debounce', key); return; }
     let em;
     if (ev.type === 'edit') {
       em = new EmbedBuilder().setColor(0xfee75c).setTimestamp().setAuthor({ name: '📝 رسالة معدّلة', iconURL: ev.thumb || undefined }).setThumbnail(ev.thumb || null)

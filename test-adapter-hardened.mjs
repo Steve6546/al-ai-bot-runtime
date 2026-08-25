@@ -64,7 +64,7 @@ console.log('\n=== Test 4: replay (same nonce) ===');
   const sig1 = sign(body1, String(ts), nonce);
   const headers1 = {'Content-Type':'application/json','X-Adapter-Token':token,'X-Timestamp':String(ts),'X-Nonce':nonce,'X-Signature':sig1};
   const r1 = await fetch('http://127.0.0.1:3415/adapter/request', {method:'POST', headers:headers1, body:body1});
-  const j1 = await r1.json().catch(()=>({}));
+  const _j1 = await r1.json().catch(()=>({}));
   const r2 = await fetch('http://127.0.0.1:3415/adapter/request', {method:'POST', headers:headers1, body:body1});
   const j2 = await r2.json().catch(()=>({}));
   const ok = r1.status === 200 && r2.status === 409 && j2.error === 'duplicate_nonce';

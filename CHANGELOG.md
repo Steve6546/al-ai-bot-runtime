@@ -3,6 +3,75 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0] — 2026-08-25
+
+### Added
+- **Diagnostics endpoints** on the adapter (unauthenticated, loopback-only):
+  `GET /health` (JSON snapshot) and `GET /metrics` (Prometheus text format,
+  `al_bot_*` metrics).
+- **Pipeline metrics**: `skipped` counters per queue (debounce/suppress drops
+  no longer inflate `sent`) and rolling p95 enqueue-to-send latency per queue
+  (`queueWaitP95Ms`, also exported to Prometheus).
+- **ESLint** (flat config, `npm run lint`) + CI lint step; core modules
+  (`event-pipeline`, `lib/config`, `lib/discord`) annotated with JSDoc types.
+- **Unix domain socket** support for the adapter on POSIX via
+  `ADAPTER_SOCKET` (mode 0600); TCP port configurable via `ADAPTER_PORT`
+  (was hardcoded 3415).
+
+### Changed
+- **stageConfig validation unified**: type/range checks now run through a
+  `controlPlanePatchSchema` derived from the runtime zod schema in
+  `lib/config.mjs` — one source of truth, no drift. The dangerous-key
+  blocklist still runs first (security is not expressible in the schema).
+- **stageConfig without base config** now rejected with an actionable error
+  instead of staging a partial file that would fail later at apply time.
+- **Dedupe memory**: adapter requestId/nonce sets became timestamped Maps
+  pruned every minute (previously only cleaned at boot; unbounded growth).
+
+### Fixed
+- Dead code flagged by ESLint: unused `writeState` (supervisor), unused
+  `STATE` constant and env imports, unused variables in tests.
+
+## [3.1.0] — 2026-08-25
+
+### Added
+- **`replay-failed.mjs`** (`npm run replay`): replays events persisted to
+  `failed-events.jsonl` as digest embeds to their log channels; archives the
+  file only after every send succeeds, otherwise atomically keeps the unsent
+  remainder. Dry-run by default via npm script.
+- **Control-plane hot-reload**: the gateway watches `control-plane.json`
+  (written atomically) and applies validated changes within ~1 s — no restart
+  needed after `config-manager apply`. Invalid files are rejected; guild
+  changes still require a supervisor restart.
+- **Join batching** (`pipeline.enqueueJoin`): joins are aggregated in a time
+  window (max 8 per embed, same retry/persist guarantees as moderation) so a
+  member raid produces one aggregated embed instead of flooding JOIN_LEAVE.
+- **Audit prefetch**: ban/unban/kick/timeout handlers start the audit-log
+  fetch at event time (`prefetchAudit`) instead of blocking the serial send
+  path with a 900 ms sleep — moderation events now resolve in ~250 ms.
+- **uncaughtException handler**: persists all queued pipeline events and
+  records the error in health-state before exiting; `unhandledRejection`
+  also records lastError now.
+- **CI** (`.github/workflows/ci.yml`): Node 22 + 24 matrix (plus Windows for
+  the platform layer) running check + tests on push/PR.
+- **Pre-commit hook** (`tools/install-hooks.sh`): blocks commits containing
+  U+FFFD encoding corruption.
+
+### Changed
+- **Runtime**: Node 24 LTS in the Dockerfile (`node:20-slim` → `node:24-slim`);
+  engines `>=22` (Node 20 reached EOL April 2026). README documents Discord's
+  June 2026 privileged-intents policy (10k unique-user threshold).
+- **REST rate limiting** (`lib/discord.mjs`): 429/503 responses honor
+  `Retry-After` / `X-RateLimit-Reset-After` with exponential backoff (3
+  retries, capped at 20 s) instead of failing immediately.
+
+### Fixed
+- **Encoding corruption**: restored Arabic voice-log titles/descriptions that
+  had been destroyed to literal `?` characters; replaced all U+FFFD artifacts
+  across sources/docs; `.env.example` mojibake fixed.
+- Supervisor BLOCKED action list no longer contains a duplicate `startGateway`.
+- `config-manager resourceValidate`: removed dead re-read of GUILD_ID.
+
 ## [2.0.0] — 2026-08-24
 
 **Breaking release** — scope change to a single-purpose runtime. The logging

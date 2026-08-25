@@ -15,7 +15,6 @@ import { readGuildId } from './lib/env.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CP = DEFAULT_CONTROL_PLANE_PATH;
 const STAGED = join(__dirname, 'control-plane.staged.json');
-const STATE = join(__dirname, 'bot-state.json');
 const LOG = join(__dirname, 'config-lifecycle.log');
 
 function logLifecycle(source, action, result, detail=''){
@@ -58,11 +57,10 @@ function diffConfigs(oldData, newData){
   return changes;
 }
 async function resourceValidate(data){
-  // Support new GUILD_ID and legacy OMNICORD_GUILD
-  let guildId = readGuildId();
-  if(!guildId) requireEnv(['GUILD_ID']);
+  // GUILD_ID required (readGuildId also accepts DISCORD_GUILD_ID/OMNICORD_GUILD aliases)
+  const guildId = readGuildId();
+  if(!guildId) requireEnv(['GUILD_ID']); // throws one actionable error
   const { DISCORD_TOKEN: token } = requireEnv(['DISCORD_TOKEN']);
-  if(!guildId) guildId = readGuildId();
   const channels = await getGuildChannels(guildId, token);
   const channelIds = new Set(channels.map(c=>c.id));
   for(const [name, id] of Object.entries(data.logging.channels)){
@@ -150,6 +148,7 @@ const source = process.argv[3] || 'cli';
         // success: remove staged
         try{ unlinkSync(STAGED);}catch{}
         console.log('apply ok — health check passed');
+        console.log('gateway hot-reload: changes take effect within ~1s (no restart needed; GUILD_ID changes still require restart)');
       }catch(e){
         logLifecycle(source,'health-check','failed',e.message);
         // rollback

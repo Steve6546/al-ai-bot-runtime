@@ -1,24 +1,29 @@
 #!/usr/bin/env node
-// integration-adapter.mjs � hardened local HTTP API (HMAC, persistent dedupe,
+// integration-adapter.mjs - hardened local HTTP API (HMAC, persistent dedupe,
 // schema, post-auth rate limit, body limit). Hybrid v2+v1: retains v2 security
 // (post-auth rate limiting, HMAC, persistent dedupe) and re-adds control-plane
-// actions (suggestConfig, applyConfig, listChannels) with strict validation.
+// actions (suggestConfig, stageConfig, listChannels) with strict validation.
 import { createServer } from 'node:http';
-import { readFileSync, appendFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, appendFileSync, existsSync, statSync, unlinkSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { startRotationWatcher } from './log-rotation.mjs';
-import { readEnv, readGuildId } from './lib/env.mjs';
+import { readEnv, readGuildId, readEnvInt } from './lib/env.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 import { getGuildChannels } from './lib/discord.mjs';
+import { controlPlanePatchSchema, schemaError } from './lib/config.mjs';
+import { isWindows } from './lib/platform.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 try {
   const _rotLogs = [join(__dirname, 'adapter.log'), join(__dirname, 'adapter-seen.jsonl')];
   startRotationWatcher(_rotLogs);
 } catch {}
-const PORT = 3415;
+const PORT = readEnvInt('ADAPTER_PORT', 3415, 1024, 65535);
+// POSIX hardening: bind a Unix domain socket (mode 0600) instead of TCP when
+// ADAPTER_SOCKET is set — filesystem permissions replace localhost-as-trust.
+const SOCKET_PATH = !isWindows ? readEnv('ADAPTER_SOCKET') : null;
 const STATE_FILE = join(__dirname, 'bot-state.json');
 const LOG_FILE = join(__dirname, 'adapter.log');
 const SEEN_FILE = join(__dirname, 'adapter-seen.jsonl');
@@ -34,10 +39,10 @@ if (!ADAPTER_TOKEN) {
   process.exit(1);
 }
 
-const ALLOWLIST = new Set(['getStatus','suggestConfig','applyConfig','diagnose','readLogs','listChannels']);
-const BLOCKED = new Set(['execOS','runShell','changeToken','updateSecrets','modifyConfig','startGateway','stopGateway','modifyConfigWithoutValidation','adminDiscordWithoutScope','startGateway','stopGatewayWithoutSupervisor']);
+const ALLOWLIST = new Set(['getStatus','suggestConfig','stageConfig','diagnose','readLogs','listChannels']);
+const BLOCKED = new Set(['execOS','runShell','changeToken','updateSecrets','modifyConfig','startGateway','stopGateway','modifyConfigWithoutValidation','adminDiscordWithoutScope','stopGatewayWithoutSupervisor']);
 
-// Dangerous key names for applyConfig � EXACT lowercase match
+// Dangerous key names for stageConfig - EXACT lowercase match
 const BLOCKED_EXACT_KEYS = new Set([
   'token','tokenenv','adapter_token','secret','password',
   'ownerid','owner','__proto__','constructor','prototype',
@@ -51,7 +56,8 @@ const SCHEMAS = {
   diagnose: { params: 'empty' },
   listChannels: { params: 'empty' },
   suggestConfig: { params: 'object' },
-  applyConfig: { params: 'applyConfig' },
+  // stageConfig — stages a config change — does NOT apply it live, requires config-manager.mjs apply afterward
+  stageConfig: { params: 'stageConfig' },
   readLogs: { params: 'readLogs' },
 };
 
@@ -76,9 +82,11 @@ function validateParams(action, params) {
     if (extra.length) return `unexpected params: ${extra.join(',')}`;
     return null;
   }
-  if (schema.params === 'applyConfig') {
+  if (schema.params === 'stageConfig') {
     if (!params || typeof params !== 'object') return 'params must be object';
     if (typeof params.schemaVersion !== 'number') return 'missing schemaVersion number';
+    // Layer 1 (security, cannot be expressed in a schema): top-level allowlist
+    // + deep scan for dangerous keys — must run BEFORE zod parsing.
     const allowedTop = new Set(['schemaVersion', 'logging', 'permissions', 'autorole']);
     for (const k of Object.keys(params)) {
       if (!allowedTop.has(k)) return `top-level key not allowed: ${k}`;
@@ -98,39 +106,22 @@ function validateParams(action, params) {
     }
     const deepErr = deepCheck(params);
     if (deepErr) return deepErr;
-    if (params.logging) {
-      if (typeof params.logging !== 'object') return 'logging must be object';
-      const allowedLogging = new Set(['debounceMs','batchMs','suppressMs','channels']);
-      for (const k of Object.keys(params.logging)) if (!allowedLogging.has(k)) return `logging key not allowed: ${k}`;
-      if (params.logging.debounceMs !== undefined && (typeof params.logging.debounceMs !== 'number' || params.logging.debounceMs < 500 || params.logging.debounceMs > 10000)) return 'debounceMs 500-10000';
-      if (params.logging.batchMs !== undefined && (typeof params.logging.batchMs !== 'number' || params.logging.batchMs < 500 || params.logging.batchMs > 20000)) return 'batchMs 500-20000';
-      if (params.logging.suppressMs !== undefined && (typeof params.logging.suppressMs !== 'number' || params.logging.suppressMs < 1000 || params.logging.suppressMs > 30000)) return 'suppressMs 1000-30000';
-      if (params.logging.channels) {
-        if (typeof params.logging.channels !== 'object') return 'channels must be object';
-        for (const [ck,cv] of Object.entries(params.logging.channels)) {
-          if (!/^\d{17,20}$/.test(String(cv))) return `channel ${ck} must be snowflake`;
-        }
-      }
-    }
-    if (params.permissions) {
-      if (typeof params.permissions !== 'object') return 'permissions must be object';
-      const allowedPerm = new Set(['controlPlaneAllowedRoles','requireAuditForModLog']);
-      for (const k of Object.keys(params.permissions)) if (!allowedPerm.has(k)) return `permissions key not allowed: ${k}`;
-    }
-    if (params.autorole) {
-      if (typeof params.autorole !== 'object') return 'autorole must be object';
-      const allowedAuto = new Set(['enabled','memberRoleName']);
-      for (const k of Object.keys(params.autorole)) if (!allowedAuto.has(k)) return `autorole key not allowed: ${k}`;
-      if (params.autorole.enabled !== undefined && typeof params.autorole.enabled !== 'boolean') return 'autorole.enabled must be boolean';
-      if (params.autorole.memberRoleName !== undefined && (typeof params.autorole.memberRoleName !== 'string' || !params.autorole.memberRoleName.trim())) return 'autorole.memberRoleName must be non-empty string';
-    }
+    // Layer 2 (types & ranges): the SAME zod patch schema derived from
+    // lib/config.mjs controlPlaneSchema — no duplicated hand-written checks
+    // that could drift from the runtime schema.
+    const parsed = controlPlanePatchSchema.safeParse(params);
+    if (!parsed.success) return `invalid params: ${schemaError(parsed.error)}`;
     return null;
   }
   return null;
 }
 
-const seenRequestIds = new Set();
-const seenNonces = new Set();
+// Dedupe maps: id -> timestamp(ms). Pruned periodically so long-running
+// adapters stay memory-bounded (previously Sets only cleaned at boot).
+const REQUEST_ID_TTL_MS = 24 * 3600 * 1000;
+const NONCE_TTL_MS = 10 * 60 * 1000;
+const seenRequestIds = new Map();
+const seenNonces = new Map();
 function loadSeen() {
   try {
     if (!existsSync(SEEN_FILE)) return;
@@ -139,13 +130,19 @@ function loadSeen() {
     for (const line of lines) {
       try {
         const obj = JSON.parse(line);
-        if (obj.requestId && now - new Date(obj.ts).getTime() < 24*3600*1000) seenRequestIds.add(obj.requestId);
-        if (obj.nonce && now - new Date(obj.ts).getTime() < 10*60*1000) seenNonces.add(obj.nonce);
+        const ts = new Date(obj.ts).getTime();
+        if (obj.requestId && now - ts < REQUEST_ID_TTL_MS) seenRequestIds.set(obj.requestId, ts);
+        if (obj.nonce && now - ts < NONCE_TTL_MS) seenNonces.set(obj.nonce, ts);
       } catch {}
     }
   } catch {}
 }
 loadSeen();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, t] of seenRequestIds) if (now - t > REQUEST_ID_TTL_MS) seenRequestIds.delete(k);
+  for (const [k, t] of seenNonces) if (now - t > NONCE_TTL_MS) seenNonces.delete(k);
+}, 60 * 1000).unref();
 function persistSeen({ requestId, nonce }) {
   try {
     const entry = JSON.stringify({ ts: new Date().toISOString(), requestId, nonce });
@@ -206,6 +203,15 @@ function authReject(res, ip, error){
 
 const server = createServer(async (req,res)=>{
   const ip = req.socket.remoteAddress || 'unknown';
+  // Unauthenticated local diagnostics (no secrets in health-state by design).
+  // Safe because the adapter only listens on loopback/Unix socket.
+  if(req.method==='GET' && (req.url==='/health' || req.url==='/metrics')){
+    if(isRateLimited(ip)){
+      res.writeHead(429,{'Content-Type':'text/plain'}); res.end('rate_limited'); return;
+    }
+    if(req.url==='/health') return handleHealth(res);
+    return handleMetrics(res);
+  }
   if(req.method!=='POST' || req.url!=='/adapter/request'){
     res.writeHead(404,{'Content-Type':'application/json'});
     res.end(JSON.stringify({ok:false,error:'not_found'}));
@@ -288,8 +294,8 @@ const server = createServer(async (req,res)=>{
       res.end(JSON.stringify({ok:false,error:'duplicate_requestId',requestId:rid}));
       return;
     }
-    seenRequestIds.add(rid);
-    seenNonces.add(nonce);
+    seenRequestIds.set(rid, Date.now());
+    seenNonces.set(nonce, Date.now());
     persistSeen({ requestId: rid, nonce });
 
     if(isCircuitOpen()){
@@ -339,6 +345,67 @@ const server = createServer(async (req,res)=>{
 function readJsonSafe(path){ try{ return JSON.parse(readFileSync(path,'utf8')); }catch{ return null; } }
 function fileAgeSec(path){ try{ return Math.round((Date.now()-statSync(path).mtimeMs)/1000); }catch{ return null; } }
 
+// ——— local diagnostics endpoints (GET /health, GET /metrics) ———
+function readHealthSafe(){ return readJsonSafe(join(__dirname,'health-state.json')) || {}; }
+
+function handleHealth(res){
+  const h = readHealthSafe();
+  const r = h.runtime || {};
+  const body = JSON.stringify({
+    ok: true,
+    gateway: r.gatewayState ?? 'unknown',
+    uptimeSec: r.uptimeSec ?? null,
+    memory: r.memory ?? null,
+    pipeline: h.pipeline ?? null,
+    lastEvent: h.lastEvent ?? null,
+    lastError: h.lastError ?? null,
+    healthSnapshotAgeSec: fileAgeSec(join(__dirname,'health-state.json')),
+  });
+  res.writeHead(200, {'Content-Type':'application/json'});
+  res.end(body);
+}
+
+function promLabelSafe(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+function handleMetrics(res){
+  const h = readHealthSafe();
+  const r = h.runtime || {};
+  const p = h.pipeline || {};
+  const queues = Object.keys(p.queueDepth || { moderation:0, member:0, server:0, voice:0, message:0 });
+  const lines = [
+    '# HELP al_bot_up Gateway websocket connectivity (1 connected)',
+    '# TYPE al_bot_up gauge',
+    `al_bot_up ${r.gatewayState === 'connected' ? 1 : 0}`,
+    '# HELP al_bot_health_snapshot_age_seconds Age of health-state.json snapshot',
+    '# TYPE al_bot_health_snapshot_age_seconds gauge',
+    `al_bot_health_snapshot_age_sec ${fileAgeSec(join(__dirname,'health-state.json')) ?? -1}`,
+    '# HELP al_bot_uptime_seconds Gateway process uptime',
+    '# TYPE al_bot_uptime_seconds gauge',
+    `al_bot_uptime_sec ${r.uptimeSec ?? 0}`,
+    '# HELP al_bot_memory_rss_bytes Resident memory of gateway process',
+    '# TYPE al_bot_memory_rss_bytes gauge',
+    `al_bot_memory_rss_bytes ${r.memory?.rss ?? 0}`,
+  ];
+  const metric = (name, help) => {
+    lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} gauge`);
+  };
+  metric('al_bot_pipeline_queue_depth', 'Pending events per queue');
+  for (const q of queues) lines.push(`al_bot_pipeline_queue_depth{queue="${promLabelSafe(q)}"} ${p.queueDepth?.[q] ?? 0}`);
+  metric('al_bot_pipeline_queue_wait_p95_ms', 'p95 enqueue-to-send latency per queue (rolling window)');
+  for (const q of queues) lines.push(`al_bot_pipeline_queue_wait_p95_ms{queue="${promLabelSafe(q)}"} ${p.queueWaitP95Ms?.[q] ?? 0}`);
+  for (const [name, key, help] of [
+    ['al_bot_pipeline_sent_total', 'sent', 'Events sent per queue'],
+    ['al_bot_pipeline_failed_total', 'failed', 'Events failed per queue'],
+    ['al_bot_pipeline_skipped_total', 'skipped', 'Events skipped (debounce/suppress) per queue'],
+    ['al_bot_pipeline_dropped_total', 'dropped', 'Events dropped on overflow per queue'],
+    ['al_bot_pipeline_retried_total', 'retried', 'Retry attempts per queue'],
+  ]) {
+    lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} counter`);
+    for (const q of queues) lines.push(`${name}{queue="${promLabelSafe(q)}"} ${p[key]?.[q] ?? 0}`);
+  }
+  res.writeHead(200, {'Content-Type':'text/plain; version=0.0.4; charset=utf-8'});
+  res.end(lines.join('\n') + '\n');
+}
+
 const HANDLERS = {
   async getStatus() {
     const s = readState();
@@ -372,7 +439,7 @@ const HANDLERS = {
     return { checks: [
       `gateway lock: ${g.lockPresent ? `present (pid ${g.pid}, mode ${g.mode})` : 'absent'}`,
       `websocket: ${g.websocket ?? 'unknown'}${g.healthAgeSec !== null ? ` (snapshot age ${g.healthAgeSec}s)` : ''}`,
-      `mode: ${hasControlPlane ? 'full (logging+autorole) � control-plane.json present' : 'minimal (presence only) � no control-plane.json'}`,
+      `mode: ${hasControlPlane ? 'full (logging+autorole) - control-plane.json present' : 'minimal (presence only) - no control-plane.json'}`,
       `pipeline: ${st.pipeline ? `active ${JSON.stringify(st.pipeline.queueDepth)}` : 'not active (minimal mode or gateway starting)'}`,
       'single-instance enforcement: active (.bot.lock)',
       'hmac + post-auth rate limit: enforced',
@@ -391,7 +458,7 @@ const HANDLERS = {
     let current = null;
     try { current = readJsonSafe(join(__dirname,'control-plane.json')); } catch {}
     if (!current) {
-      return { validated: true, suggestion: params, diff: 'no existing control-plane.json � would create new file', note: 'use applyConfig to stage' };
+      return { validated: true, suggestion: params, diff: 'no existing control-plane.json - would create new file', note: 'use stageConfig to stage' };
     }
     const changes = [];
     function diff(o,n,path=''){
@@ -416,30 +483,32 @@ const HANDLERS = {
       } else merged[k]=v;
     }
     diff(current, merged);
-    return { validated:true, suggestion: params, changes, note:'use applyConfig to stage and then config-manager apply to validate/resource-check/health-check' };
+    return { validated:true, suggestion: params, changes, note:'use stageConfig to stage and then config-manager apply to validate/resource-check/health-check' };
   },
-  async applyConfig(params) {
+  async stageConfig(params) {
     // Staged write with validation already done via validateParams; also verify against full schema if possible
     const stagedPath = join(__dirname,'control-plane.staged.json');
     // Merge with existing if exists to keep gateway/supervisor/permissions when only logging/autorole updated
     let base = readJsonSafe(join(__dirname,'control-plane.json'));
+    if (!base) {
+      // A partial update without a base produces an invalid staged file that
+      // would only fail later at apply time — reject with the actionable fix.
+      throw new Error('no existing control-plane.json to merge partial update with — create it from control-plane.example.json first');
+    }
     let toStage = params;
-    if (base && params.schemaVersion && base.schemaVersion) {
-      // If params is partial (only logging/autorole), merge to produce full file for staging
-      const isPartial = !params.gateway && !params.supervisor;
-      if (isPartial) {
-        toStage = JSON.parse(JSON.stringify(base));
-        if (params.logging) {
-          toStage.logging = { ...toStage.logging, ...params.logging };
-          if (params.logging.channels) toStage.logging.channels = { ...toStage.logging.channels, ...params.logging.channels };
-        }
-        if (params.permissions) toStage.permissions = { ...toStage.permissions, ...params.permissions };
-        if (params.autorole) toStage.autorole = { ...toStage.autorole, ...params.autorole };
-        if (params.schemaVersion) toStage.schemaVersion = params.schemaVersion;
+    if (params.schemaVersion && base.schemaVersion) {
+      // params is partial (only logging/permissions/autorole): merge onto base
+      toStage = JSON.parse(JSON.stringify(base));
+      if (params.logging) {
+        toStage.logging = { ...toStage.logging, ...params.logging };
+        if (params.logging.channels) toStage.logging.channels = { ...toStage.logging.channels, ...params.logging.channels };
       }
+      if (params.permissions) toStage.permissions = { ...toStage.permissions, ...params.permissions };
+      if (params.autorole) toStage.autorole = { ...toStage.autorole, ...params.autorole };
+      if (params.schemaVersion) toStage.schemaVersion = params.schemaVersion;
     }
     atomicWriteJson(stagedPath, toStage);
-    return { applied:false, staged:true, path:'control-plane.staged.json', stagedData: toStage, note:'staged � run "node config-manager.mjs apply --source=adapter" to validate/diff/resource-check/health-check and atomically apply' };
+    return { applied:false, staged:true, path:'control-plane.staged.json', stagedData: toStage, note:'staged - run "node config-manager.mjs apply --source=adapter" to validate/diff/resource-check/health-check and atomically apply' };
   },
   async listChannels() {
     const token = readEnv('DISCORD_TOKEN');
@@ -463,11 +532,19 @@ async function handleAction(action, params){
   return handler(params);
 }
 
-server.listen(PORT, '127.0.0.1', ()=>{
-  log(`listening on 127.0.0.1:${PORT} � allowlist: ${[...ALLOWLIST].join(', ')} � hmac enforced, maxBody ${MAX_BODY}`);
-});
+if (SOCKET_PATH) {
+  try { unlinkSync(SOCKET_PATH); } catch {}
+  server.listen(SOCKET_PATH, ()=>{
+    try { chmodSync(SOCKET_PATH, 0o600); } catch {}
+    log(`listening on unix socket ${SOCKET_PATH} (mode 0600) - allowlist: ${[...ALLOWLIST].join(', ')} - hmac enforced, maxBody ${MAX_BODY}`);
+  });
+} else {
+  server.listen(PORT, '127.0.0.1', ()=>{
+    log(`listening on 127.0.0.1:${PORT} - allowlist: ${[...ALLOWLIST].join(', ')} - hmac enforced, maxBody ${MAX_BODY}`);
+  });
+}
 function shutdown(signal){
-  log(`${signal} � closing`);
+  log(`${signal} - closing`);
   server.close(()=>process.exit(0));
   setTimeout(()=>process.exit(0), 3000).unref();
 }

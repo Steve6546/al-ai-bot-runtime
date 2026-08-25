@@ -38,7 +38,6 @@ function log(msg, extra='') {
   try { appendFileSync(LOG_FILE, line+'\n'); } catch {}
 }
 function readState(){ try{ return JSON.parse(readFileSync(STATE_FILE,'utf8')); }catch{ return {runtime:null,pid:null}; } }
-function writeState(s){ atomicWriteJson(STATE_FILE, {...s, updatedAt:new Date().toISOString()}); }
 
 // Read only the tail of a file (last `bytes`). waitForReady polls the gateway
 // log every 500 ms during boot; reading the whole (up to 10 MB) file each tick

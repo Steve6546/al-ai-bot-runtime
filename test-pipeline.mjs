@@ -12,8 +12,8 @@ async function sendEmbed(chId, embed) {
   sent.push({ chId, embed });
 }
 async function getAudit() { return null; }
-function log(...a) { /*console.log(...a)*/ }
-function err(...a) { /*console.error(...a)*/ }
+function log(..._a) { /*console.log(...a)*/ }
+function err(..._a) { /*console.error(...a)*/ }
 
 const pipeline = new EventPipeline({ client: mockClient, channels, getAudit, sendEmbed, log, err, maxLengths: { moderation: 10, message: 5, voice: 5, member: 10, server: 10 } });
 

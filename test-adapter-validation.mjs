@@ -17,8 +17,8 @@ async function adapterCall(action, params){
   }catch(e){ return {status:0, json:{error:String(e.message).slice(0,100)}}; }
 }
 
-console.log('=== T10a: VALID applyConfig with logging+permissions must pass ===');
-const good = await adapterCall('applyConfig', {
+console.log('=== T10a: VALID stageConfig with logging+permissions must pass ===');
+const good = await adapterCall('stageConfig', {
   schemaVersion: 1,
   logging: { debounceMs: 2600, batchMs: 3500, suppressMs: 10000,
     channels: { JOIN_LEAVE:'1540984557883367484', VOICE_LOG:'1540984560798666812', MOD_LOG:'1540984563776364585', MESSAGE:'1540991170740752474', MEMBER:'1540991173596942406', SERVER:'1540991176335687720' } },
@@ -28,10 +28,10 @@ console.log(good.status, JSON.stringify(good.json).slice(0,160));
 console.log(good.status===200 && good.json.ok ? 'PASS valid config accepted' : 'FAIL');
 
 console.log('\n=== T10b: __proto__/constructor nested must be rejected ===');
-const bad1 = await adapterCall('applyConfig', { schemaVersion:1, logging:{ debounceMs:2500 }, extraProto: JSON.parse('{"__proto__":{"x":1}}') });
+await adapterCall('stageConfig', { schemaVersion:1, logging:{ debounceMs:2500 }, extraProto: JSON.parse('{"__proto__":{"x":1}}') });
 // note: top-level 'extraProto' already rejected by allowlist; test nested __proto__ via raw JSON:
 const bad2raw = '{"schemaVersion":1,"logging":{"debounceMs":2500,"channels":{"JOIN_LEAVE":"1540984557883367484"}},"evil_nested":{"__proto__":{"x":1},"constructor":{}}}';
-const body2 = JSON.stringify({requestId:`t-${randomUUID()}`, identity:'owner', action:'applyConfig', params: JSON.parse(bad2raw), ownerApproval:true});
+const body2 = JSON.stringify({requestId:`t-${randomUUID()}`, identity:'owner', action:'stageConfig', params: JSON.parse(bad2raw), ownerApproval:true});
 const ts=String(Date.now()), nonce=randomUUID();
 const sig = createHmac('sha256', token).update(`${ts}.${nonce}.${body2}`).digest('hex');
 let r2;
@@ -42,7 +42,7 @@ const rejected = (r2?.status===400) || (j2.error==='invalid_params');
 console.log(rejected ? 'PASS pollution vector rejected' : `FAIL status=${r2?.status}`);
 
 console.log('\n=== T10c: ownerId injection rejected ===');
-const bad3 = await adapterCall('applyConfig', { schemaVersion:1, permissions:{ ownerId:'999' } });
+const bad3 = await adapterCall('stageConfig', { schemaVersion:1, permissions:{ ownerId:'999' } });
 console.log(bad3.status, JSON.stringify(bad3.json).slice(0,140));
 console.log(bad3.status===400 ? 'PASS ownerId rejected' : 'FAIL');
 
