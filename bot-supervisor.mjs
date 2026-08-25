@@ -19,9 +19,8 @@ const TX_LOCK = join(__dirname, '.supervisor.lock');
 const STATE_FILE = join(__dirname, 'bot-state.json');
 const LOG_FILE = join(__dirname, 'supervisor.log');
 
-// v2: one runtime — an always-online gateway presence (no logging). Legacy
-// 'logger' mode maps onto it; pre-v2 .bot.lock files still verify against
-// their original script so upgrades fail safe instead of bypassing locks.
+// Unified Runtime: single gateway (presence + full pipeline). Legacy
+// 'logger' alias maps to 'gateway' for safe upgrades of old .bot.lock files.
 const RUNTIME = {
   gateway: { script: 'gateway.mjs', name: 'gateway' },
 };

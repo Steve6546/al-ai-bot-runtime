@@ -1,11 +1,12 @@
 // tools/check.mjs — static checks that need no dependencies:
 //  1. node --check on every .mjs file (root, lib/, tools/)
-//  2. JSON.parse on package.json
+//  2. JSON.parse on package.json and control-plane.example.json
 //  3. .env.example exists and declares every key the code requires
 import { readdirSync, statSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { controlPlaneSchema } from '../lib/config.mjs';
 import { ENV_KEYS } from '../lib/env.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -44,11 +45,17 @@ for (const f of files) {
   else ok('entrypoint index.js present, name <= 16 chars');
 }
 
-// 2. JSON files parse
-for (const jf of ['package.json']) {
+// 2. JSON files parse (and the example validates against the shared schema)
+for (const jf of ['package.json', 'control-plane.example.json']) {
   try {
-    JSON.parse(readFileSync(join(root, jf), 'utf8'));
-    ok(`${jf} parses`);
+    const data = JSON.parse(readFileSync(join(root, jf), 'utf8'));
+    if (jf === 'control-plane.example.json') {
+      const parsed = controlPlaneSchema.safeParse(data);
+      if (!parsed.success) fail(`${jf} schema: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+      else ok(`${jf} parses and validates`);
+    } else {
+      ok(`${jf} parses`);
+    }
   } catch (e) {
     fail(`${jf}: ${e.message}`);
   }

@@ -1,11 +1,8 @@
-// tools/run-tests.mjs — one-command test runner (npm test).
-// Order matters: offline suites first, then the adapter is started (or reused
-// if one is already listening) for the HTTP suites, and the rate-limit burst
-// test runs LAST because it saturates the 60 req/min per-IP limiter.
-// If .env does not exist, a local one is created with a generated
-// ADAPTER_TOKEN and a placeholder DISCORD_TOKEN — never a real token.
+// tools/run-tests.mjs � one-command test runner (npm test). Hybrid v2+v1.
+// Order matters: offline suites first, then adapter is started for HTTP suites.
+// If .env does not exist, a local one is created with generated ADAPTER_TOKEN.
 import { spawn, execSync } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
@@ -15,51 +12,66 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const ADAPTER_URL = 'http://127.0.0.1:3415/adapter/request';
 
 function run(cmd) {
-  console.log(`\n>>> ${cmd}`);
+  console.log("\n>>> " + cmd);
   execSync(cmd, { cwd: root, stdio: 'inherit' });
 }
 
 async function adapterUp() {
   try {
     const r = await fetch(ADAPTER_URL, { method: 'POST', body: '{}' });
-    return r.status === 404 || r.status === 401 || r.status === 429; // any routed response means listening
+    return r.status === 404 || r.status === 401 || r.status === 429;
   } catch { return false; }
 }
 
 function ensureEnvFile() {
   const envPath = join(root, '.env');
   if (existsSync(envPath)) return;
-  console.log('[runner] .env not found — creating one with a generated ADAPTER_TOKEN and a placeholder DISCORD_TOKEN');
+  console.log('[runner] .env not found � creating one with generated ADAPTER_TOKEN and placeholder Discord values');
   writeFileSync(envPath,
-    `DISCORD_TOKEN=placeholder_not_a_real_token\n` +
-    `ADAPTER_TOKEN=${randomBytes(32).toString('hex')}\n`);
+    'DISCORD_TOKEN=placeholder_not_a_real_token\n' +
+    'OMNICORD_GUILD=123456789012345678\n' +
+    'ADAPTER_TOKEN=' + randomBytes(32).toString('hex') + '\n');
 }
 
 async function main() {
   run('node tools/check.mjs');
+  run('node test-config.mjs');
   run('node test-platform.mjs');
 
-  // Entrypoint fail-fast: `node index.js` must exit non-zero with a clear
-  // FATAL message BEFORE any Discord traffic when no token is configured.
-  // DISCORD_TOKEN='' overrides any existing .env (dotenv never overrides
-  // real env vars), so this is deterministic and offline.
+  // Entrypoint fail-fast (hybrid): without DISCORD_TOKEN, gateway must exit non-zero with FATAL
   {
-    console.log('\n>>> node index.js (expect fast token failure)');
-    let out = '';
+    const envPath = join(root, '.env');
+    let hadEnv = existsSync(envPath);
+    let backupContent = null;
     try {
-      out = execSync('node index.js', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, env: { ...process.env, DISCORD_TOKEN: '' } });
-      throw new Error('entrypoint exited 0 without DISCORD_TOKEN — should have failed fast');
-    } catch (e) {
-      out = String(e.stdout || '') + String(e.stderr || '');
-      if (!/FATAL/.test(out)) throw new Error(`entrypoint did not fail with a clear message: ${out.slice(0, 200)}`);
-      console.log('PASS entrypoint fails fast with clear token error (no Discord contact)');
+      if (hadEnv) {
+        backupContent = readFileSync(envPath, 'utf8');
+        writeFileSync(envPath, 'ADAPTER_TOKEN=' + randomBytes(32).toString('hex') + '\n');
+      } else {
+        writeFileSync(envPath, 'ADAPTER_TOKEN=' + randomBytes(32).toString('hex') + '\n');
+      }
+      console.log('\n>>> node index.js (expect fast DISCORD_TOKEN failure)');
+      let out = '';
+      try {
+        out = execSync('node index.js', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
+        throw new Error('entrypoint exited 0 without DISCORD_TOKEN � should have failed fast');
+      } catch (e) {
+        out = String(e.stdout || '') + String(e.stderr || '');
+        if (!/FATAL/.test(out) || !/DISCORD_TOKEN/.test(out)) throw new Error('entrypoint did not fail with DISCORD_TOKEN FATAL: ' + out.slice(0, 300));
+        console.log('PASS entrypoint fails fast with clear DISCORD_TOKEN error (no Discord contact)');
+      }
+    } finally {
+      if (hadEnv && backupContent !== null) {
+        writeFileSync(envPath, backupContent, 'utf8');
+      } else {
+        try { unlinkSync(envPath); } catch {}
+      }
     }
   }
 
+  run('node test-pipeline.mjs');
   ensureEnvFile();
 
-  // Reuse an already-listening adapter; otherwise start a child just for the
-  // HTTP suites and stop it afterwards.
   let child = null;
   if (!(await adapterUp())) {
     console.log('\n[runner] starting integration adapter for HTTP suites...');
@@ -79,11 +91,11 @@ async function main() {
   }
 
   try {
-    // light HTTP suites first (rate-limit budget), burst test last
     run('node test-stability-fixes.mjs');
+    run('node test-adapter-validation.mjs');
     run('node test-adapter-hardened.mjs');
   } finally {
-    if (child?.pid) {
+    if (child && child.pid) {
       console.log('\n[runner] stopping adapter...');
       try { child.kill(); } catch {}
       await new Promise(r => setTimeout(r, 1500));

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "gateway": {
+    "tokenEnv": "DISCORD_TOKEN",
+    "singleRuntimeOnly": true,
+    "allowedRuntimes": ["gateway"],
+    "defaultRuntime": "gateway"
+  },
+  "supervisor": {
+    "pidFile": ".bot.pid",
+    "lockFile": ".bot.lock",
+    "stateFile": "bot-state.json",
+    "logFile": "supervisor.log",
+    "staleLockMs": 30000,
+    "gracefulStopMs": 6000,
+    "verifyCmdline": true
+  },
+  "permissions": {
+    "ownerId": "123456789012345678",
+    "controlPlaneAllowedRoles": ["Owner", "Co Owner"],
+    "requireAuditForModLog": true
+  },
+  "logging": {
+    "channels": {
+      "JOIN_LEAVE": "1111111111111111111",
+      "VOICE_LOG": "2222222222222222222",
+      "MOD_LOG": "3333333333333333333",
+      "MESSAGE": "4444444444444444444",
+      "MEMBER": "5555555555555555555",
+      "SERVER": "6666666666666666666"
+    },
+    "debounceMs": 2500,
+    "batchMs": 3500,
+    "suppressMs": 10000
+  },
+  "autorole": {
+    "enabled": true,
+    "memberRoleName": "Member"
+  }
+}
