@@ -3,8 +3,7 @@
 Production-hardened Discord **unified runtime** — single gateway, single pipeline, single config, with MCP as a secure control layer.
 
 - **Presence:** Always-online gateway with real websocket health (`health-state.json`) and single-instance lock (`.bot.lock`).
-- **Pipeline:** 6-channel logging (JOIN_LEAVE/VOICE/MOD/MESSAGE/MEMBER/SERVER) via 5 bounded queues, audit resolution, and per-channel circuit — active when `control-plane.json` + `GUILD_ID` are present, otherwise the runtime stays in zero-intent presence.
-- **Control:** MCP (integration-adapter on `127.0.0.1:3415`, HMAC + dedupe + rate limit) exposes 6 tools (`getStatus/diagnose/readLogs/suggestConfig/stageConfig/listChannels`) as thin interfaces to the runtime services — no duplicated Discord logic.
+- **Pipeline:** 6-channel logging (JOIN_LEAVE/VOICE/MOD/MESSAGE/MEMBER/SERVER) via 5 bounded queues, audit resolution, and per-channel circuit — active when `control-plane.json` + `GUILD_ID` are present, otherwise the runtime stays in zero-intent presence.- **Control:** MCP (integration-adapter on `127.0.0.1:3415`, HMAC + dedupe + rate limit) exposes 6 tools (`getStatus/diagnose/readLogs/suggestConfig/stageConfig/listChannels`) as thin interfaces to the runtime services — no duplicated Discord logic.
 
 This repository contains the runtime (`gateway`, `event-pipeline`, `bot-supervisor`), the control plane (`lib/config`, `control-plane.json`), the MCP layer (`integration-adapter`), and shared services (`lib/discord`, `lib/platform`, `lib/atomic`).
 
@@ -12,7 +11,7 @@ This repository contains the runtime (`gateway`, `event-pipeline`, `bot-supervis
 
 ```
 .env (DISCORD_TOKEN [+ GUILD_ID + ADAPTER_TOKEN])
-  + control-plane.json (6 channels, timings, permissions, autorole)
+  + control-plane.json (6 channels, timings, autorole)
     → Single Gateway Runtime (gateway.mjs — unified)
         → presence: health watcher + .bot.lock
         → pipeline (when configured): 5 queues → 6 channels
@@ -51,7 +50,7 @@ AI Agent → MCP (integration-adapter, HMAC, 127.0.0.1:3415)
 | المستوى | الرتبة | ID | الصلاحية | الاستخدام |
 |---|---|---|---|---|
 | 122 | `AL AI` (البوت) | `1540966100747944020` | `Administrator (8)` | يجب أن تبقى أعلى من `Member` (111) ليستطيع إسنادها |
-| 121 | `👑 Owner` | `1540977894728142888` | إدارة كاملة | `controlPlaneAllowedRoles` — فقط هؤلاء يطبقون `stageConfig` |
+| 121 | `👑 Owner` | `1540977894728142888` | إدارة كاملة | التحكم بالبوت عبر MCP محمي بـ `ADAPTER_TOKEN` (HMAC) — ليس بالرتب |
 | 120 | `Co Owner` | `1540977897077080165` | إدارة كاملة | ثانوي للـ Owner |
 | 119 | `Head Admin` | `1540977899467968572` | إدارة | إشراف عام |
 | 118 | `Admin` | `1540977901871042580` | إدارة |  |
@@ -62,11 +61,10 @@ AI Agent → MCP (integration-adapter, HMAC, 127.0.0.1:3415)
 **أفضل ممارسة للرتب (Best Practice):**
 
 1. **اعزل رتبة البوت:** `AL AI` أعلى من `Member` بـ 11 مستوى — لا تضع أي رتبة فوقها إلا `Owner`.
-2. **استخدم `controlPlaneAllowedRoles` فقط للتحكم في `MCP`:** `["👑 Owner","Co Owner"]` — لا تضع `Admin` هنا إلا اذا أردت توسيع التحكم.
+2. **التحكم في MCP عبر الـ token:** `ADAPTER_TOKEN` (HMAC) هو خط الدفاع الوحيد — من يملكه يطبق `stageConfig`. لا تشاركه إلا مع الثقة.
 3. **Autorole:** اترك `autorole.memberRoleName="Member"` — البوت يبحث عبر `guild.roles.cache.find(r=>r.name==="Member")` ثم `member.roles.add(role)` — إذا لم يجدها لا يفشل.
 4. **لا تكرر رتب Level يدوياً:** رتب `Level X` تُدار تلقائياً — أي تعديل يدوي يكسر التدرج.
-5. **تحقق قبل كل عملية رتبة:** استخدم `getGuildRoles` من `lib/discord` للتحقق أن `roleId` موجود قبل `addRoleToMember`/`removeRoleFromMember`.
-6. **Audit:** كل `roleAdd/roleRemove/nick` يُسجل في `MEMBER` log مع `color` و `author` — راجع `MEMBER` channel قبل أي تغيير واسع.
+5. **Audit:** كل `roleAdd/roleRemove/nick` يُسجل في `MEMBER` log مع `color` و `author` — راجع `MEMBER` channel قبل أي تغيير واسع.
 
 ## Configuration
 
@@ -75,7 +73,7 @@ AI Agent → MCP (integration-adapter, HMAC, 127.0.0.1:3415)
 | `DISCORD_TOKEN` | `.env` | **always** | bot token | لا تشاركه أبداً — ضعه في `Pterodactyl Variable` كـ secret |
 | `GUILD_ID` | `.env` | full mode only | guild ID 17-20 | استخدم `GUILD_ID` الجديد (alias القديم `OMNICORD_GUILD` ما زال يعمل) |
 | `ADAPTER_TOKEN` | `.env` | adapter only | HMAC secret | ولّده بـ `randomBytes(32).hex` ودوّره عند التسريب |
-| 6 channels + timings + autorole + permissions | `control-plane.json` | full mode only | نسخ من `control-plane.example.json` | عدّل فقط `channels` و `ownerId` و `memberRoleName` — اترك `gateway/supervisor` كما هي. **Hot-reload:** التعديلات تُلتقط تلقائياً خلال ~1 ثانية بدون restart (تغيير `GUILD_ID` يتطلب restart) |
+| 6 channels + timings + autorole | `control-plane.json` | full mode only | نسخ من `control-plane.example.json` | عدّل فقط `channels` و `memberRoleName`. **Hot-reload:** التعديلات تُلتقط تلقائياً خلال ~1 ثانية بدون restart (تغيير `GUILD_ID` يتطلب restart) |
 | `HEALTH_INTERVAL_MS` etc. | `.env` | optional | clamped | لا تغيرها إلا اذا كان السيرفر ضعيف (الافتراضي 20s/10MB×14 مثالي) |
 
 **قاعدة ذهبية:** كل تفاعل مع Discord (قنوات/رتب/أعضاء/رسائل) يجب أن يمر عبر `lib/discord.mjs` — هذا يضمن `multi-guild` آمن (كل دالة تأخذ `guildId`), ويمنع تكرار `fetch`, ويوحّد التحقق من `snowflake`.
@@ -103,7 +101,7 @@ copy .env.example .env
 
 # 2) enable full mode: copy and edit control-plane
 copy control-plane.example.json control-plane.json
-# edit control-plane.json -> 6 channel IDs, ownerId, autorole.memberRoleName
+# edit control-plane.json -> 6 channel IDs, autorole.memberRoleName
 
 # 3) validate config (optional but recommended)
 npm run config:validate
@@ -160,7 +158,7 @@ Channels (full mode, from control-plane.json):
 
 - `POST http://127.0.0.1:3415/adapter/request` - mandatory headers: `X-Adapter-Token`, `X-Timestamp`, `X-Nonce`, `X-Signature: HMAC-SHA256(timestamp.nonce.body, ADAPTER_TOKEN)`
 - **Allowlist:** `getStatus, diagnose, readLogs` (always) + `suggestConfig, stageConfig, listChannels` (full mode, via `lib/discord` service)
-- **Blocked:** `execOS, runShell, changeToken, updateSecrets, modifyConfigWithoutValidation, ...` - exact-key blocklist plus deep scan for `__proto__/constructor/token/ownerId` etc.
+- **Blocked:** any action outside the allowlist (`execOS`, `runShell`, `changeToken`, ...) is rejected with 403 before validation, plus a deep scan for dangerous keys (`__proto__/constructor/token` etc.) in staged configs.
 - `maxBody 64KB`, `timeout 5s`, post-auth rate limit (60/min per IP, separate brute-force bucket for failed auth), persistent `requestId`/`nonce` dedupe (24h/10min)
 - `suggestConfig` - validates partial update and returns diff preview vs current `control-plane.json`
 - `stageConfig` - validates, merges with existing file if partial, stages to `control-plane.staged.json` (then run `node config-manager.mjs apply` for resource validation + health check + atomic apply or rollback)
@@ -203,7 +201,7 @@ node replay-failed.mjs --archive        # sends digests, archives the file on fu
 
 GitHub Actions (`.github/workflows/ci.yml`) runs `npm ci && npm run lint && npm run check && npm test`
 on every push/PR across Node 22 + 24 (plus a Windows job for the platform layer).
-A pre-commit hook (`tools/install-hooks.sh`) blocks commits containing U+FFFD
+A pre-commit hook (`npm run hooks`) blocks commits containing U+FFFD
 encoding corruption. ESLint (`npm run lint`) catches unused vars, undefined
 globals and shadowing; core modules carry JSDoc types for editor-time checking.
 

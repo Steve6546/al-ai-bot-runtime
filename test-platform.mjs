@@ -69,7 +69,7 @@ check('T-P1 no/invalid pid -> dead on both implementations',
   writeFileSync(probe, 'setTimeout(() => {}, 60000);\n');
   let pid = null;
   try {
-    pid = await spawnDetachedNode({ scriptPath: probe, args: [], logOut: probeLog, cwd: tmpdir(), expectedScript: `alrt-probe-${id}` });
+    pid = await spawnDetachedNode({ scriptPath: probe, args: [], logOut: probeLog, cwd: tmpdir() });
     await sleep(isWindows ? 2500 : 800);
     const alive = verifyProcess(pid, `alrt-probe-${id}`);
     check('T-P9 detached spawn alive with matching command', alive.state === 'alive', `${alive.state}: ${alive.reason}`);

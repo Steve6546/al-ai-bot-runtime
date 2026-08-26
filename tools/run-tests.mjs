@@ -41,7 +41,7 @@ async function main() {
   // Entrypoint fail-fast (hybrid): without DISCORD_TOKEN, gateway must exit non-zero with FATAL
   {
     const envPath = join(root, '.env');
-    let hadEnv = existsSync(envPath);
+    const hadEnv = existsSync(envPath);
     let backupContent = null;
     try {
       if (hadEnv) {

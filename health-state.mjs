@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { atomicWriteJson } from './lib/atomic.mjs';
+import { readJsonSafe as safeReadJson } from './lib/util.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HEALTH_FILE = join(__dirname, 'health-state.json');
@@ -9,10 +9,6 @@ const STATE_FILE = join(__dirname, 'bot-state.json');
 
 let lastError = null;
 let lastWarnAt = 0;
-
-function safeReadJson(path, fallback=null) {
-  try { return JSON.parse(readFileSync(path,'utf8')); } catch { return fallback; }
-}
 
 // discord.js client.ws.status → semantic state. Status enum:
 // 0 Ready, 1 Connecting, 2 Reconnecting, 3 Idle, 4 Nearly, 5 Disconnected.
@@ -23,7 +19,7 @@ function mapWsState(ws) {
 }
 
 // No token, no secrets, no headers, no body, no message content, no user data
-export function buildHealthState({ pipelineMetrics, lastEvent, manualCircuit, wsStatus } = {}) {
+export function buildHealthState({ pipelineMetrics, lastEvent, wsStatus } = {}) {
   const state = safeReadJson(STATE_FILE, {});
   const mem = process.memoryUsage();
   const uptimeSec = Math.round(process.uptime());
@@ -56,8 +52,7 @@ export function buildHealthState({ pipelineMetrics, lastEvent, manualCircuit, ws
       uptimeSec,
       memory: { rss: mem.rss, heapUsed: mem.heapUsed, heapTotal: mem.heapTotal, external: mem.external },
     },
-    pipeline: pipelineMetrics || null, // always null since the pipeline removal — kept for shape compatibility
-    circuits: manualCircuit || null,
+    pipeline: pipelineMetrics || null, // null in minimal mode; queue metrics in full mode
     lastEvent: lastEvent ? { ts: lastEvent.ts, type: lastEvent.type } : null, // only timestamp/type, no user data
     lastError: lastError ? { ts: lastError.ts, category: lastError.category, code: String(lastError.code).slice(0,80) } : null,
   };

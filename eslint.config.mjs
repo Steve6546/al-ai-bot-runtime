@@ -19,6 +19,8 @@ export default [
       'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' }],
       'no-empty': ['error', { allowEmptyCatch: true }],
       'no-async-promise-executor': 'error',
+      'prefer-const': 'error',
+      'no-var': 'error',
       'require-atomic-updates': 'off', // false positives around await in this pipeline
       'no-console': 'off',             // CLI/runtime logs via console are intentional
     },

@@ -5,7 +5,7 @@ const mockClient = {
   guilds: { fetch: async () => ({ channels: { fetch: async () => ({ isTextBased: () => true, send: async () => {} }) } }) }
 };
 const channels = { MOD_LOG: 'mod', MEMBER: 'member', SERVER: 'server', VOICE_LOG: 'voice', MESSAGE: 'msg', JOIN_LEAVE: 'join' };
-let sent = [];
+const sent = [];
 async function sendEmbed(chId, embed) {
   // simulate occasional failure for MOD_LOG to test retry/failed file
   if (chId === 'mod' && Math.random() < 0.1) throw new Error('429 rate limited');

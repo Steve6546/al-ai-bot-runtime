@@ -52,7 +52,7 @@ function rotateOne(filePath) {
 }
 
 // Run rotation for a list of files, non-blocking
-export function rotateLogs(filePaths) {
+function rotateLogs(filePaths) {
   // run async in next tick, light
   setImmediate(() => {
     for (const p of filePaths) {

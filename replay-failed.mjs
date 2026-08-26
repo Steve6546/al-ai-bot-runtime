@@ -7,13 +7,13 @@
 // Usage:
 //   node replay-failed.mjs [--dry-run] [--max N] [--archive]
 //   npm run replay   (dry-run by default)
-import { readFileSync, writeFileSync, existsSync, renameSync, openSync, closeSync, fsyncSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import { EmbedBuilder } from 'discord.js';
 import { tryResolveRuntimeConfig } from './lib/config.mjs';
 import { sendEmbed } from './lib/discord.mjs';
+import { atomicWriteText } from './lib/atomic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FAILED_FILE = join(__dirname, 'failed-events.jsonl');
@@ -23,21 +23,6 @@ const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = 
 const DRY_RUN = !!args['dry-run'];
 const MAX_SENDS = Math.max(1, Math.min(Number(args.max) || 50, 500));
 const ARCHIVE = !!args.archive || !DRY_RUN; // non-dry runs archive by default
-
-function atomicWriteText(path, text) {
-  const tmp = `${path}.tmp.${process.pid}.${randomUUID().slice(0, 8)}`;
-  const fd = openSync(tmp, 'w');
-  try {
-    writeFileSync(fd, text);
-    try { fsyncSync(fd); } catch {}
-  } catch (e) {
-    closeSync(fd);
-    try { unlinkSync(tmp); } catch {}
-    throw e;
-  }
-  closeSync(fd);
-  renameSync(tmp, path);
-}
 
 // Same routing as EventPipeline.getChannelForCategory
 function channelFor(cfg, category, ev) {
@@ -80,7 +65,7 @@ async function main() {
     return;
   }
   const lines = readFileSync(FAILED_FILE, 'utf8').split('\n').filter(Boolean);
-  let entries = [];
+  const entries = [];
   let bad = 0;
   for (const line of lines) {
     try { entries.push(JSON.parse(line)); } catch { bad++; }

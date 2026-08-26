@@ -5,11 +5,11 @@
 import { readFileSync, existsSync, unlinkSync, copyFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { controlPlaneSchema, DEFAULT_CONTROL_PLANE_PATH } from './lib/config.mjs';
+import { controlPlaneSchema, DEFAULT_CONTROL_PLANE_PATH, diffConfigs } from './lib/config.mjs';
 import { requireEnv } from './lib/env.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 import { verifyProcess } from './lib/platform.mjs';
-import { getGuildChannels, getGuildRoles, getChannel } from './lib/discord.mjs';
+import { getGuildChannels, getChannel } from './lib/discord.mjs';
 import { readGuildId } from './lib/env.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -37,25 +37,6 @@ function validateFile(path){
   }
   return parsed.data;
 }
-function diffConfigs(oldData, newData){
-  const changes = [];
-  function walk(o,n,path=''){
-    const keys = new Set([...Object.keys(o||{}), ...Object.keys(n||{})]);
-    for(const k of keys){
-      const p = path ? `${path}.${k}` : k;
-      const ov = o?.[k], nv = n?.[k];
-      if(JSON.stringify(ov) !== JSON.stringify(nv)){
-        if(ov && nv && typeof ov==='object' && typeof nv==='object' && !Array.isArray(ov)){
-          walk(ov,nv,p);
-        } else {
-          changes.push({path:p, from: ov, to: nv});
-        }
-      }
-    }
-  }
-  walk(oldData, newData);
-  return changes;
-}
 async function resourceValidate(data){
   // GUILD_ID required (readGuildId also accepts DISCORD_GUILD_ID/OMNICORD_GUILD aliases)
   const guildId = readGuildId();
@@ -65,11 +46,6 @@ async function resourceValidate(data){
   const channelIds = new Set(channels.map(c=>c.id));
   for(const [name, id] of Object.entries(data.logging.channels)){
     if(!channelIds.has(id)) throw new Error(`channel ${name} id ${id} not found in guild`);
-  }
-  const roles = await getGuildRoles(guildId, token);
-  const roleNames = new Set(roles.map(r=>r.name));
-  for(const rn of data.permissions.controlPlaneAllowedRoles){
-    if(!roleNames.has(rn)) throw new Error(`role ${rn} not found`);
   }
   return true;
 }

@@ -3,6 +3,69 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.5.0] — 2026-08-26
+
+**Final cleanup release** — zero dead code, verified by an independent
+line-level audit (every export ↔ call site, every branch reachability).
+
+### Removed
+- **Unreachable branches** proven dead by the verification audit:
+  - `handleMember` join arm — joins route through `enqueueJoin`/`flushJoins`
+    since 3.1.0, so no `type:'join'` event can ever enter this handler.
+  - `handleVoice` custom-`fields` arm — no producer sets `fields`.
+  - `handleMessage` delete-arm thumbnail — the delete producer never sets
+    `thumb`.
+- `tools/install-hooks.sh` → replaced by cross-platform
+  `tools/install-hooks.mjs` (`npm run hooks`).
+
+### Changed
+- Last duplicated inline `JSON.parse(readFileSync(...))` lock reads in
+  `gateway.mjs` unified onto `lib/util.readJsonSafe` — one JSON-read idiom
+  across the whole repo.
+- ESLint now enforces `prefer-const` + `no-var` permanently.
+
+### Verified against official guidance (2026)
+- REST layer honors Discord's documented rate-limit contract
+  (`Retry-After` / `X-RateLimit-Reset-After`, no hardcoded limits) per
+  discord.com/developers docs.
+- Message-cache sweeper matches the recommended sweepers pattern.
+- Runtime live-verified: gateway connected, `/health` + `/metrics` serving,
+  supervisor restart cycle executed on the shipped code.
+
+## [3.3.0] — 2026-08-25
+
+**Simplification release** — ~370 LOC of dead/duplicated code removed with no
+loss of safety or reliability (audit-driven).
+
+### Removed
+- **25 dead exports from `lib/discord.mjs`** (83% of the service layer had zero
+  call sites): guild/role/member/message/moderation/webhook CRUD helpers.
+  The file is now ~100 lines covering only its 5 real consumers.
+- **Decorative control-plane sections**: `gateway`, `supervisor` and
+  `permissions` (`ownerId`, `controlPlaneAllowedRoles`,
+  `requireAuditForModLog`) were schema-enforced but read by no runtime code.
+  Legacy files carrying them still validate (zod strips unknown keys).
+- **Adapter BLOCKED action list**: redundant security theatre — the strict
+  ALLOWLIST already rejects everything outside it.
+
+### Added
+- **`lib/util.mjs`**: shared `sleep` / `readJsonSafe` / `isSnowflake` —
+  replaces 8 previously duplicated helper definitions across modules.
+
+### Changed
+- `diffConfigs` + `mergePartialUpdate` now live in `lib/config.mjs`; the
+  adapter's `suggestConfig` and `stageConfig` share ONE merge and ONE diff
+  implementation (previously two diverging copies in one file), and
+  config-manager reuses the same diff. stageConfig response now includes
+  the computed `changes`.
+- Supervisor `start` and `restart` merged into a single `startRuntime(restart)`
+  (~40 duplicated lines removed); inline sleep promises replaced by
+  `lib/util.sleep`.
+- Event pipeline: shared `memberField()`/`timeField()` embed-field builders
+  replace repeated inline rows.
+- Tests updated for the new surface: legacy-section stripping, allowlist-based
+  rejection, permissions-free staging.
+
 ## [3.2.0] — 2026-08-25
 
 ### Added

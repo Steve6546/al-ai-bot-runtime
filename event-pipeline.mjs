@@ -14,7 +14,9 @@ const FAILED_FILE = join(__dirname, 'failed-events.jsonl');
 
 const DEFAULT_MAX = { moderation: 200, member: 120, server: 100, voice: 60, message: 100 };
 const DEFAULT_TIMING = { debounceMs: 2500, batchMs: 3500, suppressMs: 10000 };
-export const AUDIT_WINDOW_MS = 12000;
+// Audit-log propagation window: bans/mutes are suppressed for at least this
+// long so the follow-up leave event is not logged as a plain leave.
+const AUDIT_WINDOW_MS = 12000;
 const MOD_FLUSH_RETRIES = 2;
 const JOIN_BATCH_MAX = 8;
 // Rolling window of enqueue-to-send latencies per category used for p95.
@@ -51,6 +53,14 @@ function percentile(arr, p) {
   const sorted = [...arr].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
 }
+
+// Shared embed fields — every handler ends with the same member/time rows.
+const timeField = () => ({ name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true });
+const memberField = (targetId, targetTag, full = true) => ({
+  name: '👤 العضو',
+  value: full ? `<@${targetId}> (\`${targetTag}\` — \`${targetId}\`)` : `<@${targetId}> (\`${targetTag}\`)`,
+  inline: false,
+});
 
 export class EventPipeline {
   /** @param {EventPipelineDeps} deps */
@@ -348,10 +358,7 @@ export class EventPipeline {
         return;
       }
       const em = new EmbedBuilder().setColor(0x99aab5).setTimestamp().setAuthor({ name: '📤 خروج عضو' }).setThumbnail(ev.thumb || null)
-        .addFields(
-          { name: '👤 العضو', value: `<@${ev.targetId}> (\`${ev.targetTag}\` — \`${ev.targetId}\`)`, inline: false },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
-        );
+        .addFields(memberField(ev.targetId, ev.targetTag), timeField());
       await this._sendEmbed(this.CH.JOIN_LEAVE, em);
       return;
     }
@@ -407,10 +414,7 @@ export class EventPipeline {
       if (batch.length === 1) {
         const ev = batch[0];
         em = new EmbedBuilder().setColor(0x57f287).setTimestamp().setAuthor({ name: '📥 دخول عضو جديد' }).setThumbnail(ev.thumb || null)
-          .addFields(
-            { name: '👤 العضو', value: `<@${ev.targetId}> (\`${ev.targetTag}\` — \`${ev.targetId}\`)`, inline: false },
-            { name: '🕒 الوقت', value: `<t:${Math.floor(ev._ts/1000)}:R>`, inline: true }
-          );
+          .addFields(memberField(ev.targetId, ev.targetTag), timeField());
       } else {
         em = new EmbedBuilder().setColor(0x57f287).setTimestamp().setAuthor({ name: `📥 دخول جماعي — ${batch.length} أعضاء` })
           .setDescription(batch.slice(0, 20).map(e => `• <@${e.targetId}> (\`${e.targetTag}\`)`).join('\n').slice(0, 3500))
@@ -468,7 +472,7 @@ export class EventPipeline {
         if (first.thumb) em.setThumbnail(first.thumb);
         if (sameActor && first.actor) em.addFields({ name: '🛡️ المنفذ', value: `<@${first.actor.id}>`, inline: true });
         if (first.reason) em.addFields({ name: '📝 السبب', value: first.reason.slice(0,600), inline: true });
-        em.addFields({ name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true });
+        em.addFields(timeField());
         await ch.send({ embeds: [em] });
       }
       this.log(`pipeline flushed mod batch: ${batch.length}`);
@@ -498,32 +502,26 @@ export class EventPipeline {
     const e = new EmbedBuilder().setColor(b.color).setTimestamp();
     if (b.title) e.setAuthor({ name: b.title });
     if (b.thumb) e.setThumbnail(b.thumb);
-    e.addFields({ name: '👤 المستهدف', value: `<@${b.targetId}> (\`${b.targetTag}\` — \`${b.targetId}\`)`, inline: false });
+    e.addFields(memberField(b.targetId, b.targetTag));
     if (b.actor) e.addFields({ name: '🛡️ المنفذ', value: `<@${b.actor.id}> (\`${b.actor.tag}\`)`, inline: true });
     else e.addFields({ name: '🛡️ المنفذ', value: '`غير معروف / النظام`', inline: true });
     e.addFields({ name: '📝 السبب', value: b.reason ? b.reason.slice(0,800) : '`لا يوجد سبب`', inline: true });
-    e.addFields({ name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true });
+    e.addFields(timeField());
     return e;
   }
   // ——— member ———
+  // NOTE: joins never reach this queue — gateway routes them through
+  // enqueueJoin()/flushJoins() (raid-safe batching). This handler only sees
+  // roleAdd/roleRemove/nick.
   async handleMember(ev) {
-    if (ev.type === 'join') {
-      const em = new EmbedBuilder().setColor(0x57f287).setTimestamp().setAuthor({ name: '📥 دخول عضو جديد' }).setThumbnail(ev.thumb || null)
-        .addFields(
-          { name: '👤 العضو', value: `<@${ev.targetId}> (\`${ev.targetTag}\` — \`${ev.targetId}\`)`, inline: false },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
-        );
-      await this._sendEmbed(this.CH.JOIN_LEAVE, em);
-      return;
-    }
     if (this.isSuppressed(ev.targetId)) { ev._skipped = true; this.log('member suppressed', ev.targetTag); return; }
     if (!this.shouldFire(`mupd-${ev.targetId}`, this.timing.debounceMs)) { ev._skipped = true; this.log('member debounce', ev.targetTag); return; }
     if (ev.type === 'roleAdd' || ev.type === 'roleRemove') {
       const em = new EmbedBuilder().setColor(ev.color).setTimestamp().setThumbnail(ev.thumb || null).setAuthor({ name: ev.title })
         .addFields(
-          { name: '👤 العضو', value: `<@${ev.targetId}> (\`${ev.targetTag}\`)`, inline: false },
+          memberField(ev.targetId, ev.targetTag, false),
           { name: '🎭 الرتب', value: ev.roles.map(r=>`\`${r}\``).join(', ').slice(0,900), inline: false },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField()
         );
       await this._sendEmbed(this.CH.MEMBER, em);
       return;
@@ -533,14 +531,16 @@ export class EventPipeline {
         .addFields(
           { name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true },
           { name: '📝 من → إلى', value: `\`${ev.oldNick||'(بلا)'}\` → \`${ev.newNick||'(بلا)'}\``, inline: true },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField(),
         );
       await this._sendEmbed(this.CH.MEMBER, em);
     }
   }
   // ——— server ———
   async handleServer(ev) {
-    if (ev.role?.managed || ev.role?.tags?.botId) return;
+    // Managed/bot-integration roles are maintained by Discord itself — logging
+    // their create/update/delete would be noise; count them as skipped.
+    if (ev.role?.managed || ev.role?.tags?.botId) { ev._skipped = true; return; }
     if (ev.type === 'roleUpdate' && !this.shouldFire(`rupdate-${ev.role?.id || ev.newR?.id}`, this.timing.debounceMs)) { ev._skipped = true; return; }
     let em;
     if (ev.type === 'roleCreate') {
@@ -549,7 +549,7 @@ export class EventPipeline {
         .addFields(
           { name: '🎭 الرتبة', value: `\`${ev.role.name}\` (<@&${ev.role.id}>)`, inline: true },
           { name: '🛡️ المنفذ', value: audit?.executor ? `<@${audit.executor.id}>` : '`النظام`', inline: true },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField()
         );
     } else if (ev.type === 'roleDelete') {
       const audit = await this.getAudit(await this.client.guilds.fetch(ev.guildId), AuditLogEvent.RoleDelete, ev.role.id);
@@ -557,7 +557,7 @@ export class EventPipeline {
         .addFields(
           { name: '🎭 الرتبة', value: `\`${ev.role.name}\``, inline: true },
           { name: '🛡️ المنفذ', value: audit?.executor ? `<@${audit.executor.id}>` : '`غير معروف`', inline: true },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField()
         );
       if (audit?.reason) em.addFields({ name: '📝 السبب', value: audit.reason.slice(0,600), inline: true });
     } else if (ev.type === 'roleUpdate') {
@@ -566,7 +566,7 @@ export class EventPipeline {
         .addFields(
           { name: '🎭 من → إلى', value: `\`${ev.oldR.name}\` → \`${ev.newR.name}\``, inline: true },
           { name: '🛡️ المنفذ', value: audit?.executor ? `<@${audit.executor.id}>` : '`غير معروف`', inline: true },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField(),
         );
     } else if (ev.type === 'channelCreate') {
       const audit = await this.getAudit(await this.client.guilds.fetch(ev.guildId), AuditLogEvent.ChannelCreate, ev.channel.id);
@@ -574,7 +574,7 @@ export class EventPipeline {
         .addFields(
           { name: '💬 القناة', value: `<#${ev.channel.id}> (\`${ev.channel.name}\`)`, inline: true },
           { name: '🛡️ المنفذ', value: audit?.executor ? `<@${audit.executor.id}>` : '`النظام`', inline: true },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField(),
         );
     } else if (ev.type === 'channelDelete') {
       const audit = await this.getAudit(await this.client.guilds.fetch(ev.guildId), AuditLogEvent.ChannelDelete, ev.channel.id);
@@ -582,7 +582,7 @@ export class EventPipeline {
         .addFields(
           { name: '💬 القناة', value: `\`${ev.channel.name}\``, inline: true },
           { name: '🛡️ المنفذ', value: audit?.executor ? `<@${audit.executor.id}>` : '`غير معروف`', inline: true },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField(),
         );
       if (audit?.reason) em.addFields({ name: '📝 السبب', value: audit.reason.slice(0,600), inline: true });
     }
@@ -594,12 +594,9 @@ export class EventPipeline {
     if (!this.shouldFire(key, this.timing.debounceMs)) { ev._skipped = true; this.log('voice debounce', ev.targetTag); return; }
     const em = new EmbedBuilder().setColor(ev.color).setTimestamp().setAuthor({ name: ev.title }).setDescription(ev.desc);
     if (ev.thumb) em.setThumbnail(ev.thumb);
-    if (ev.fields) { for (const f of ev.fields) em.addFields(f); }
-    else {
-      if (ev.oldChannel && !ev.newChannel) em.addFields({ name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true }, { name: '🔊 الروم', value: `\`${ev.oldName || ev.oldChannel}\``, inline: true }, { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true });
-      else if (!ev.oldChannel && ev.newChannel) em.addFields({ name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true }, { name: '🔊 الروم', value: `<#${ev.newChannel}>`, inline: true }, { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true });
-      else if (ev.oldChannel && ev.newChannel) em.addFields({ name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true }, { name: '🔊 من → إلى', value: `\`${ev.oldName}\` → \`${ev.newName}\``, inline: true }, { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true });
-    }
+    if (ev.oldChannel && !ev.newChannel) em.addFields({ name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true }, { name: '🔊 الروم', value: `\`${ev.oldName || ev.oldChannel}\``, inline: true }, timeField());
+    else if (!ev.oldChannel && ev.newChannel) em.addFields({ name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true }, { name: '🔊 الروم', value: `<#${ev.newChannel}>`, inline: true }, timeField());
+    else if (ev.oldChannel && ev.newChannel) em.addFields({ name: '👤 العضو', value: `<@${ev.targetId}>`, inline: true }, { name: '🔊 من → إلى', value: `\`${ev.oldName}\` → \`${ev.newName}\``, inline: true }, timeField());
     await this._sendEmbed(this.CH.VOICE_LOG, em);
   }
   // ——— message ———
@@ -615,7 +612,7 @@ export class EventPipeline {
           { name: '🔗 الرسالة', value: `[انتقل](https://discord.com/channels/${ev.guildId}/${ev.channelId}/${ev.id})`, inline: true },
           { name: 'قبل', value: (ev.before||'(فارغ)').slice(0,800) || '(فارغ)', inline: false },
           { name: 'بعد', value: (ev.after||'(فارغ)').slice(0,800) || '(فارغ)', inline: false },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField(),
         );
     } else {
       em = new EmbedBuilder().setColor(0xed4245).setTimestamp().setAuthor({ name: '🗑️ رسالة محذوفة', iconURL: ev.author?.displayAvatarURL?.() || undefined })
@@ -623,10 +620,9 @@ export class EventPipeline {
           { name: '👤 العضو', value: ev.author ? `<@${ev.author.id}> (\`${ev.author.tag}\`)` : '`unknown`', inline: true },
           { name: '💬 الروم', value: `<#${ev.channelId}>`, inline: true },
           { name: '📝 المحتوى', value: (ev.content||'(ملف/تضمين)').slice(0,900), inline: false },
-          { name: '🕒 الوقت', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true }
+          timeField(),
         );
       if (ev.attachments) em.addFields({ name: '📎 المرفقات', value: `${ev.attachments} ملف`, inline: true });
-      if (ev.thumb) em.setThumbnail(ev.thumb);
     }
     await this._sendEmbed(this.CH.MESSAGE, em);
   }

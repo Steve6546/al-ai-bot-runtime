@@ -4,7 +4,7 @@
 // (6 channels, 5 queues, autorole, audit) when both are present. Unified
 // Discord service via lib/discord.mjs. Single gateway, single lock, single
 // pipeline — no duplication with MCP.
-import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync, closeSync, fsyncSync, watch } from 'node:fs';
+import { writeFileSync, existsSync, unlinkSync, openSync, closeSync, fsyncSync, watch } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client, GatewayIntentBits, Partials, Events, AuditLogEvent } from 'discord.js';
@@ -17,6 +17,7 @@ import { tryResolveRuntimeConfig, controlPlaneSchema, DEFAULT_CONTROL_PLANE_PATH
 import { gatewayLogPath, projectDir } from './lib/paths.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 import { sendViaClientOrRest } from './lib/discord.mjs';
+import { sleep, readJsonSafe } from './lib/util.mjs';
 import { randomUUID } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -68,7 +69,6 @@ const HEALTH_INTERVAL_MS = readEnvInt('HEALTH_INTERVAL_MS', 20000, 5000, 300000)
 const MESSAGE_CACHE_SWEEP_SECONDS = readEnvInt('MESSAGE_CACHE_SWEEP_SECONDS', 1800, 300, 86400);
 const log = (...a) => console.log(new Date().toISOString(), 'LOG:', ...a);
 const err = (...a) => console.log(new Date().toISOString(), 'ERR:', ...a);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const LOCK_NONCE = randomUUID();
 const LOCK_DATA = {
@@ -83,7 +83,8 @@ const LOCK_DATA = {
 try {
   if (existsSync(LOCK_FILE)) {
     try {
-      const existing = JSON.parse(readFileSync(LOCK_FILE, 'utf8'));
+      const existing = readJsonSafe(LOCK_FILE);
+      if (!existing) throw new Error('unreadable lock');
       // Support pre-v2 locks (autorole-logger.mjs) for safe upgrades: verify against original script.
       const expectedForExisting = existing.mode === 'logger' ? 'autorole-logger.mjs' : 'gateway.mjs';
       const v = verifyProcess(existing.pid, expectedForExisting);
@@ -124,7 +125,8 @@ try {
 function cleanupLock() {
   try {
     if (!existsSync(LOCK_FILE)) return;
-    const cur = JSON.parse(readFileSync(LOCK_FILE, 'utf8'));
+    const cur = readJsonSafe(LOCK_FILE);
+    if (!cur) return;
     if (String(cur.pid) === String(process.pid) && cur.nonce === LOCK_NONCE) {
       try { unlinkSync(LOCK_FILE); } catch {}
       console.log(new Date().toISOString(), 'LOG: lock released', LOCK_NONCE.slice(0,8));
@@ -283,7 +285,8 @@ if (FULL_MODE) {
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
         try {
-          const parsed = controlPlaneSchema.safeParse(JSON.parse(readFileSync(DEFAULT_CONTROL_PLANE_PATH, 'utf8')));
+          const raw = readJsonSafe(DEFAULT_CONTROL_PLANE_PATH);
+          const parsed = controlPlaneSchema.safeParse(raw);
           if (!parsed.success) {
             log('hot-reload rejected invalid control-plane.json:', parsed.error.issues.map(i => i.message).join('; ').slice(0, 200));
             return;

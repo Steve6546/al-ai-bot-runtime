@@ -1,25 +1,5 @@
 {
   "schemaVersion": 1,
-  "gateway": {
-    "tokenEnv": "DISCORD_TOKEN",
-    "singleRuntimeOnly": true,
-    "allowedRuntimes": ["gateway"],
-    "defaultRuntime": "gateway"
-  },
-  "supervisor": {
-    "pidFile": ".bot.pid",
-    "lockFile": ".bot.lock",
-    "stateFile": "bot-state.json",
-    "logFile": "supervisor.log",
-    "staleLockMs": 30000,
-    "gracefulStopMs": 6000,
-    "verifyCmdline": true
-  },
-  "permissions": {
-    "ownerId": "123456789012345678",
-    "controlPlaneAllowedRoles": ["Owner", "Co Owner"],
-    "requireAuditForModLog": true
-  },
   "logging": {
     "channels": {
       "JOIN_LEAVE": "1111111111111111111",

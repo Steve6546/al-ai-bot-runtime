@@ -56,7 +56,7 @@ function tryGetProcess(pid) {
 export function verifyProcess(pid, expectedScript = null) {
   if (!pid) return { state: 'dead', method: 'none', reason: 'no pid' };
   // 1. Try Get-CimInstance (most reliable, gives cmdline)
-  let r = tryGetCim(pid);
+  const r = tryGetCim(pid);
   if (r.state === 'alive') {
     if (expectedScript) {
       const ok = r.cmd && r.cmd.includes(expectedScript);
@@ -72,7 +72,7 @@ export function verifyProcess(pid, expectedScript = null) {
     return { state: 'dead', method: 'Get-CimInstance+tasklist', reason: `${r.reason} + ${r2.reason}` };
   }
   // r.state === unknown → try fallbacks, never declare dead on single unknown
-  let r2 = tryTasklist(pid);
+  const r2 = tryTasklist(pid);
   if (r2.state === 'alive') return { state: 'alive', method: r2.method, reason: r2.reason };
   if (r2.state === 'dead') {
     // tasklist says dead, but Cim was unknown — need third check
@@ -86,9 +86,4 @@ export function verifyProcess(pid, expectedScript = null) {
   if (r3.state === 'alive') return { state: 'alive', method: r3.method, reason: r3.reason };
   if (r3.state === 'dead') return { state: 'unknown', method: 'Get-CimInstance+tasklist+Get-Process', reason: `cim unknown, tasklist unknown, get-process dead — treat as unknown` };
   return { state: 'unknown', method: 'all', reason: `cim:${r.reason} tasklist:${r2.reason} get-process:${r3.reason}`.slice(0,300) };
-}
-
-export function isAliveSafe(pid) {
-  const v = verifyProcess(pid);
-  return v.state === 'alive';
 }

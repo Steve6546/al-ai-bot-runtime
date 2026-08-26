@@ -24,8 +24,10 @@ const EXAMPLE = join(projectDir, 'control-plane.example.json');
   const parsed = controlPlaneSchema.safeParse(example);
   check('T-C1 example control-plane validates', parsed.success,
     parsed.error ? parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ') : '');
-  check('T-C1b example ownerId is snowflake-shaped', isSnowflake(example.permissions.ownerId),
-    `got ${example.permissions.ownerId}`);
+  // legacy decorative sections (gateway/supervisor/permissions) must strip away silently
+  const legacy = { ...example, gateway: { tokenEnv: 'DISCORD_TOKEN' }, supervisor: { pidFile: '.bot.pid' }, permissions: { ownerId: '123456789012345678' } };
+  const parsedLegacy = controlPlaneSchema.safeParse(legacy);
+  check('T-C1b legacy decorative sections stripped silently', parsedLegacy.success && !('gateway' in parsedLegacy.data), '');
 }
 
 // ——— 2. loadControlPlane error paths ———
@@ -44,10 +46,10 @@ const MISSING = join(TMP, 'missing.json');
 
   const BAD_SCHEMA = join(TMP, 'bad-schema.json');
   const bad = JSON.parse(readFileSync(EXAMPLE, 'utf8'));
-  bad.permissions.ownerId = 'YOUR_ID_HERE';
+  bad.logging.debounceMs = 'way-too-fast';
   writeFileSync(BAD_SCHEMA, JSON.stringify(bad));
   try { loadControlPlane(BAD_SCHEMA); } catch (e) { msg = e.message; }
-  check('T-C4 placeholder ownerId -> schema error naming the field', msg.includes('permissions.ownerId'), msg);
+  check('T-C4 invalid field -> schema error naming the field', msg.includes('logging.debounceMs'), msg);
 }
 
 // ——— 3. resolveRuntimeConfig happy path (temp config, injected env) ———

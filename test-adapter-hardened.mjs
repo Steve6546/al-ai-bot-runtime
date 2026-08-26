@@ -92,10 +92,12 @@ console.log('\n=== Test 6: invalid params (readLogs with non-numeric lines) ==='
   console.log(r.status === 400 && r.json.error === 'invalid_params' ? 'PASS invalid params rejected' : `FAIL got ${r.status} ${JSON.stringify(r.json).slice(0,100)}`);
 }
 
-console.log('\n=== Test 7: blocked action ===');
+console.log('\n=== Test 7: non-allowlisted action rejected ===');
 {
+  // Security is allowlist-based: anything outside ALLOWLIST gets 403.
   const r = await req({action:'execOS', params:{}});
-  console.log(r.status === 403 && r.json.error === 'action_blocked' ? 'PASS blocked action rejected' : `FAIL got ${r.status} ${JSON.stringify(r.json).slice(0,100)}`);
+  const ok = r.status === 403 && /action_(not_)?(blocked|allowlisted)/.test(r.json.error || '');
+  console.log(ok ? 'PASS non-allowlisted action rejected' : `FAIL got ${r.status} ${JSON.stringify(r.json).slice(0,100)}`);
 }
 
 console.log('\n=== Test 8: valid request ===');

@@ -12,8 +12,9 @@ import { startRotationWatcher } from './log-rotation.mjs';
 import { readEnv, readGuildId, readEnvInt } from './lib/env.mjs';
 import { atomicWriteJson } from './lib/atomic.mjs';
 import { getGuildChannels } from './lib/discord.mjs';
-import { controlPlanePatchSchema, schemaError } from './lib/config.mjs';
+import { controlPlanePatchSchema, schemaError, diffConfigs, mergePartialUpdate } from './lib/config.mjs';
 import { isWindows } from './lib/platform.mjs';
+import { readJsonSafe } from './lib/util.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 try {
@@ -40,7 +41,9 @@ if (!ADAPTER_TOKEN) {
 }
 
 const ALLOWLIST = new Set(['getStatus','suggestConfig','stageConfig','diagnose','readLogs','listChannels']);
-const BLOCKED = new Set(['execOS','runShell','changeToken','updateSecrets','modifyConfig','startGateway','stopGateway','modifyConfigWithoutValidation','adminDiscordWithoutScope','stopGatewayWithoutSupervisor']);
+// Security relies on the strict allowlist above: any action outside it is
+// rejected before validation. (A separate blocklist was redundant — it could
+// only ever reject actions the allowlist already rejects.)
 
 // Dangerous key names for stageConfig - EXACT lowercase match
 const BLOCKED_EXACT_KEYS = new Set([
@@ -87,7 +90,7 @@ function validateParams(action, params) {
     if (typeof params.schemaVersion !== 'number') return 'missing schemaVersion number';
     // Layer 1 (security, cannot be expressed in a schema): top-level allowlist
     // + deep scan for dangerous keys — must run BEFORE zod parsing.
-    const allowedTop = new Set(['schemaVersion', 'logging', 'permissions', 'autorole']);
+    const allowedTop = new Set(['schemaVersion', 'logging', 'autorole']);
     for (const k of Object.keys(params)) {
       if (!allowedTop.has(k)) return `top-level key not allowed: ${k}`;
       if (BLOCKED_EXACT_KEYS.has(k.toLowerCase())) return `blocked key: ${k}`;
@@ -180,7 +183,7 @@ setInterval(() => {
   }
 }, 60000);
 
-let circuit = { failures:0, openUntil:0 };
+const circuit = { failures:0, openUntil:0 };
 function isCircuitOpen(){ return Date.now() < circuit.openUntil; }
 function recordCircuit(ok){ if(ok){ circuit.failures=0; return; } circuit.failures++; if(circuit.failures>=3) circuit.openUntil = Date.now()+15000; }
 
@@ -189,7 +192,8 @@ function log(line){
   console.log(l);
   try{ appendFileSync(LOG_FILE, l+'\n'); }catch{}
 }
-function readState(){ try{ return JSON.parse(readFileSync(STATE_FILE,'utf8')); }catch{ return {runtime:null,pid:null}; } }
+function readState(){ return readJsonSafe(STATE_FILE) || {runtime:null,pid:null}; }
+function fileAgeSec(path){ try{ return Math.round((Date.now()-statSync(path).mtimeMs)/1000); }catch{ return null; } }
 
 function authReject(res, ip, error){
   if (recordAuthFailure(ip)) {
@@ -303,11 +307,6 @@ const server = createServer(async (req,res)=>{
       res.end(JSON.stringify({ok:false,error:'circuit_open',retryAfterMs: circuit.openUntil-Date.now()}));
       return;
     }
-    if(BLOCKED.has(action)){
-      res.writeHead(403,{'Content-Type':'application/json'});
-      res.end(JSON.stringify({ok:false,error:'action_blocked',action}));
-      return;
-    }
     if(!ALLOWLIST.has(action)){
       res.writeHead(403,{'Content-Type':'application/json'});
       res.end(JSON.stringify({ok:false,error:'action_not_allowlisted',action,allowlist:[...ALLOWLIST]}));
@@ -341,9 +340,6 @@ const server = createServer(async (req,res)=>{
     }
   });
 });
-
-function readJsonSafe(path){ try{ return JSON.parse(readFileSync(path,'utf8')); }catch{ return null; } }
-function fileAgeSec(path){ try{ return Math.round((Date.now()-statSync(path).mtimeMs)/1000); }catch{ return null; } }
 
 // ——— local diagnostics endpoints (GET /health, GET /metrics) ———
 function readHealthSafe(){ return readJsonSafe(join(__dirname,'health-state.json')) || {}; }
@@ -412,7 +408,7 @@ const HANDLERS = {
     const health = readJsonSafe(join(__dirname,'health-state.json'));
     const lock = readJsonSafe(join(__dirname,'.bot.lock'));
     // Try to include pipeline metrics if full mode
-    let pipelineMetrics = health?.pipeline || null;
+    const pipelineMetrics = health?.pipeline || null;
     // Also try to read control-plane for channel config
     let controlPlane = null;
     try { controlPlane = readJsonSafe(join(__dirname,'control-plane.json')); } catch {}
@@ -460,55 +456,24 @@ const HANDLERS = {
     if (!current) {
       return { validated: true, suggestion: params, diff: 'no existing control-plane.json - would create new file', note: 'use stageConfig to stage' };
     }
-    const changes = [];
-    function diff(o,n,path=''){
-      const keys=new Set([...Object.keys(o||{}), ...Object.keys(n||{})]);
-      for(const k of keys){
-        const p=path?path+'.'+k:k;
-        const ov=o?.[k], nv=n?.[k];
-        if(JSON.stringify(ov)!==JSON.stringify(nv)){
-          if(ov && nv && typeof ov==='object' && typeof nv==='object' && !Array.isArray(ov)){
-            diff(ov,nv,p);
-          } else changes.push({path:p, from:ov, to:nv});
-        }
-      }
-    }
-    // For suggest, params is partial; merge into current for diff preview
-    const merged = JSON.parse(JSON.stringify(current));
-    // shallow merge top-level keys from params
-    for(const [k,v] of Object.entries(params)){
-      if(v && typeof v==='object' && !Array.isArray(v) && merged[k] && typeof merged[k]==='object'){
-        Object.assign(merged[k], v);
-        if(v.channels) Object.assign(merged[k], {channels: {...(merged[k].channels||{}), ...v.channels}});
-      } else merged[k]=v;
-    }
-    diff(current, merged);
+    const merged = mergePartialUpdate(current, params);
+    const changes = diffConfigs(current, merged);
     return { validated:true, suggestion: params, changes, note:'use stageConfig to stage and then config-manager apply to validate/resource-check/health-check' };
   },
   async stageConfig(params) {
     // Staged write with validation already done via validateParams; also verify against full schema if possible
     const stagedPath = join(__dirname,'control-plane.staged.json');
-    // Merge with existing if exists to keep gateway/supervisor/permissions when only logging/autorole updated
-    let base = readJsonSafe(join(__dirname,'control-plane.json'));
+    // Merge with existing via the shared mergePartialUpdate; a partial update
+    // without a base produces an invalid staged file that would only fail
+    // later at apply time — reject with the actionable fix instead.
+    const base = readJsonSafe(join(__dirname,'control-plane.json'));
     if (!base) {
-      // A partial update without a base produces an invalid staged file that
-      // would only fail later at apply time — reject with the actionable fix.
       throw new Error('no existing control-plane.json to merge partial update with — create it from control-plane.example.json first');
     }
-    let toStage = params;
-    if (params.schemaVersion && base.schemaVersion) {
-      // params is partial (only logging/permissions/autorole): merge onto base
-      toStage = JSON.parse(JSON.stringify(base));
-      if (params.logging) {
-        toStage.logging = { ...toStage.logging, ...params.logging };
-        if (params.logging.channels) toStage.logging.channels = { ...toStage.logging.channels, ...params.logging.channels };
-      }
-      if (params.permissions) toStage.permissions = { ...toStage.permissions, ...params.permissions };
-      if (params.autorole) toStage.autorole = { ...toStage.autorole, ...params.autorole };
-      if (params.schemaVersion) toStage.schemaVersion = params.schemaVersion;
-    }
+    const toStage = mergePartialUpdate(base, params);
+    const changes = diffConfigs(base, toStage);
     atomicWriteJson(stagedPath, toStage);
-    return { applied:false, staged:true, path:'control-plane.staged.json', stagedData: toStage, note:'staged - run "node config-manager.mjs apply --source=adapter" to validate/diff/resource-check/health-check and atomically apply' };
+    return { applied:false, staged:true, path:'control-plane.staged.json', changes, stagedData: toStage, note:'staged - run "node config-manager.mjs apply --source=adapter" to validate/diff/resource-check/health-check and atomically apply' };
   },
   async listChannels() {
     const token = readEnv('DISCORD_TOKEN');
