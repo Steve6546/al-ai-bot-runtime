@@ -1,4 +1,4 @@
-# AL AI Bot Runtime (v3.0.0 — Unified Runtime)
+# AL AI Bot Runtime (v4.5.0 — Unified Runtime)
 
 Production-hardened Discord **unified runtime** — single gateway, single pipeline, single config, with MCP as a secure control layer.
 

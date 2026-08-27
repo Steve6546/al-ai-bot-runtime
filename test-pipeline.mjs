@@ -6,9 +6,10 @@ const mockClient = {
 };
 const channels = { MOD_LOG: 'mod', MEMBER: 'member', SERVER: 'server', VOICE_LOG: 'voice', MESSAGE: 'msg', JOIN_LEAVE: 'join' };
 const sent = [];
+let sendCount = 0;
 async function sendEmbed(chId, embed) {
-  // simulate occasional failure for MOD_LOG to test retry/failed file
-  if (chId === 'mod' && Math.random() < 0.1) throw new Error('429 rate limited');
+  // Deterministic failure: fail every 10th send to MOD_LOG (reproduces retry scenario)
+  if (chId === 'mod' && (sendCount++ % 10) === 0) throw new Error('429 rate limited');
   sent.push({ chId, embed });
 }
 async function getAudit() { return null; }

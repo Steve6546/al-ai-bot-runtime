@@ -98,7 +98,10 @@ try {
         console.log(new Date().toISOString(), `LOG: removing stale .bot.lock ${existing.pid} (${v.method}: ${v.reason})`);
         try { unlinkSync(LOCK_FILE); } catch {}
       }
-    } catch { try { unlinkSync(LOCK_FILE); } catch {} }
+    } catch (e) {
+      console.error(new Date().toISOString(), 'FATAL: lock file error - refusing to proceed', e.message);
+      process.exit(5);
+    }
   }
   let lockFd;
   try { lockFd = openSync(LOCK_FILE, 'wx'); }
@@ -385,13 +388,13 @@ if (FULL_MODE) {
     if (removed.size) {
       pipeline.enqueue('member', {
         type: 'roleRemove', targetId: newM.id, targetTag: newM.user.tag, thumb: newM.user.displayAvatarURL(),
-        guildId: newM.guild.id, roles: removed.map(r => r.name), color: 0xed4245, title: '➖ ????? ????'
+        guildId: newM.guild.id, roles: removed.map(r => r.name), color: 0xed4245, title: '➖ إزالة رتبة'
       });
     }
     if (added.size) {
       pipeline.enqueue('member', {
         type: 'roleAdd', targetId: newM.id, targetTag: newM.user.tag, thumb: newM.user.displayAvatarURL(),
-        guildId: newM.guild.id, roles: added.map(r => r.name), color: 0x57f287, title: '➕ ????? ????'
+        guildId: newM.guild.id, roles: added.map(r => r.name), color: 0x57f287, title: '➕ إضافة رتبة'
       });
     }
     if (oldM.nickname !== newM.nickname) {

@@ -221,16 +221,21 @@ const server = createServer(async (req,res)=>{
     res.end(JSON.stringify({ok:false,error:'not_found'}));
     return;
   }
-  let body=''; let tooLarge=false;
+  const bodyChunks=[]; let totalBytes=0; let tooLarge=false;
   req.on('data',c=>{
     if(tooLarge) return;
-    body+=c;
-    if(body.length > MAX_BODY){
+    bodyChunks.push(c);
+    totalBytes += Buffer.byteLength(c);
+    if(totalBytes > MAX_BODY){
       tooLarge=true;
       try{ req.destroy(); }catch{}
     }
   });
   req.on('end', async ()=>{
+    let body='';
+    if(!tooLarge){
+      body = Buffer.concat(bodyChunks).toString('utf8');
+    }
     if(tooLarge){
       res.writeHead(413,{'Content-Type':'application/json'});
       res.end(JSON.stringify({ok:false,error:'body_too_large',max:MAX_BODY}));
