@@ -221,7 +221,7 @@ const server = createServer(async (req,res)=>{
     res.end(JSON.stringify({ok:false,error:'not_found'}));
     return;
   }
-  let bodyChunks=[]; let totalBytes=0; let tooLarge=false;
+  const bodyChunks=[]; let totalBytes=0; let tooLarge=false;
   req.on('data',c=>{
     if(tooLarge) return;
     bodyChunks.push(c);
