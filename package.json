@@ -1,13 +1,15 @@
 {
   "name": "al-ai-bot-runtime",
-  "version": "4.5.0",
-  "description": "Unified Discord runtime — single gateway, 5-queue event pipeline, 6 log channels, autorole, health, and MCP control layer (6 tools) via hardened adapter. Single Discord service, single lock. Windows/Linux/Docker.",
+  "version": "5.0.0",
+  "description": "Unified Discord runtime — single gateway, bounded event pipeline, secure local MCP control layer, health and audit services.",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "start": "node index.js",
+    "start:all": "node tools/start-all.mjs",
+    "bootstrap": "node tools/bootstrap.mjs",
     "start:gateway": "node bot-supervisor.mjs --mode=gateway --action=start",
     "start:logger": "node bot-supervisor.mjs --mode=logger --action=start",
     "restart:gateway": "node bot-supervisor.mjs --mode=gateway --action=restart",
