@@ -1,6 +1,6 @@
 {
   "name": "al-ai-bot-runtime",
-  "version": "5.0.0",
+  "version": "4.5.0",
   "description": "Unified Discord runtime — single gateway, bounded event pipeline, secure local MCP control layer, health and audit services.",
   "type": "module",
   "engines": {
