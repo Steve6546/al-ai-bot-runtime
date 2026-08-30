@@ -58,6 +58,7 @@ try {
 
   console.log('[bootstrap] running repository checks...');
   run(['run', 'check']);
+  run(['run', 'security:check']);
 
   const envReady = ensureEnv();
   if (!envReady) process.exit(0);
