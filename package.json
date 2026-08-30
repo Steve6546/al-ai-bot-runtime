@@ -21,6 +21,7 @@
     "replay": "node replay-failed.mjs --dry-run",
     "hooks": "node tools/install-hooks.mjs",
     "check": "node tools/check.mjs",
+    "security:check": "node tools/check-security.mjs",
     "lint": "eslint .",
     "test": "node tools/run-tests.mjs",
     "test:adapter": "node test-adapter-hardened.mjs",
