@@ -4,6 +4,7 @@
  * Starts the single gateway and, when configured, the local MCP adapter.
  * Uses Node's process executable directly so Windows paths/spaces are safe.
  */
+import 'dotenv/config';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -37,7 +38,7 @@ function start(name, script) {
   return child;
 }
 
-async function shutdown(code = 0) {
+function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const [name, child] of children) {
@@ -49,15 +50,15 @@ async function shutdown(code = 0) {
   setTimeout(() => process.exit(code), 1500).unref();
 }
 
-process.on('SIGINT', () => void shutdown(0));
-process.on('SIGTERM', () => void shutdown(0));
+process.on('SIGINT', () => shutdown(0));
+process.on('SIGTERM', () => shutdown(0));
 process.on('uncaughtException', (error) => {
   console.error(`[launcher] uncaught exception: ${error.stack || error.message}`);
-  void shutdown(1);
+  shutdown(1);
 });
 process.on('unhandledRejection', (error) => {
   console.error(`[launcher] unhandled rejection: ${error instanceof Error ? error.stack || error.message : String(error)}`);
-  void shutdown(1);
+  shutdown(1);
 });
 
 if (!existsSync(join(root, 'gateway.mjs'))) {
